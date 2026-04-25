@@ -1,5 +1,28 @@
 # Weight Steering
 
+> **Fork notice (wassname, 2026-04):** this is a working fork that strips the
+> upstream Axolotl + vLLM + Anthropic-batch-API stack and rebuilds the core
+> method on HF + PEFT + uv, targeting Qwen3-0.6B for cheap iteration. Goals:
+> (1) replicate `w = θ⁺ − θ⁻` on a small model, (2) test alignment of `w` with
+> SVD subspaces of the pretrained `W` and the AntiPaSTO subspaces, (3) compare
+> adapter families (LoRA / DoRA / PiSSA-init / DeLoRA) under the
+> "adapter as hypothesis" framing, (4) eval on daily-dilemmas.
+>
+> Pipeline (see `justfile`):
+> ```
+> just smoke           # full pipeline on tiny-random qwen3 + BEARTYPE=1, ~1 min
+> just replicate       # data → train pos → train neg → diff → eval → subspace
+> just subspace-align  # phase 2: SVD top-k + weak-readout alignment table
+> just adapter-sweep   # phase 3: LoRA / DoRA / PiSSA / DeLoRA sweep (TODO)
+> just eval-dilemmas   # phase 4: daily-dilemmas Yes/No logratio (TODO)
+> ```
+> Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_subspace,run_sweep}.py`,
+> `src/ws/eval/{sycophancy,dilemmas}.py`. Outputs to `out/<behavior>/<adapter>/`.
+>
+> Original README from upstream below.
+
+---
+
 Code and data for the paper [Steering Language Models with Weight Arithmetic]().
 
 # Obtaining steering vectors
