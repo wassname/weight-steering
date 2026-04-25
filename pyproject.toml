@@ -31,9 +31,15 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ws"]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.uv]
+exclude-newer = "5 days"

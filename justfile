@@ -1,14 +1,23 @@
 # weight-steering recipes. Default model is Qwen3-0.6B for cheap iteration.
 
+set shell := ["bash", "-cu"]
+
 model := "Qwen/Qwen3-0.6B"
 behavior := "sycophancy"
 adapter := "lora"
 out := "out"
 
-# Quick end-to-end check: tiny data, 1 epoch, qualitative gen at coeff +/-1.
-smoke:
-    uv run python -m scripts.replicate --model {{model}} --behavior {{behavior}} \
-        --adapter {{adapter}} --n-pairs 32 --max-steps 20 --smoke
+SMOKE_MODEL := "katuni4ka/tiny-random-qwen3"
+SMOKE_LOG := "out/smoke/smoke.log"
+
+# Smoke: BEARTYPE=1 + tiny random model. Exercises full pipeline end-to-end.
+# Catches dim/dtype errors via jaxtyping runtime checks. ~1 min on CPU.
+smoke *ARGS:
+    mkdir -p out/smoke && \
+    BEARTYPE=1 uv run python evals/smoke.py \
+        --model {{SMOKE_MODEL}} \
+        {{ARGS}} \
+        2>&1 | tee {{SMOKE_LOG}} | tail -200
 
 # Generate +/- pair data for a behavior. Writes to out/data/{behavior}/.
 data:
@@ -36,16 +45,16 @@ eval-dilemmas:
 
 # Phase 2: project w onto SVD + AntiPaSTO subspaces, print alignment table.
 subspace-align:
-    uv run python -m scripts.subspace_align --model {{model}} \
+    uv run python -m ws.run_subspace --model {{model}} \
         --adapter {{adapter}} --out {{out}}
 
 # Phase 3: full sweep over LoRA, DoRA, PiSSA-init LoRA, DeLoRA.
 adapter-sweep:
-    uv run python -m scripts.adapter_sweep --model {{model}} --behavior {{behavior}} --out {{out}}
+    uv run python -m ws.run_sweep --model {{model}} --behavior {{behavior}} --out {{out}}
 
 # Replicate: full phase-1 pipeline (data -> train pos -> train neg -> diff -> eval).
 replicate:
-    uv run python -m scripts.replicate --model {{model}} --behavior {{behavior}} \
+    uv run python -m ws.replicate --model {{model}} --behavior {{behavior}} \
         --adapter {{adapter}} --n-pairs 1000
 
 setup:
