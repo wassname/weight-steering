@@ -1,0 +1,6 @@
+2026-04-26T19:50:18.413132+0800 | INFO | __main__:<module>:95 - loaded Qwen/Qwen3-0.6B | layers=28 | d_model=1024 | LoRA tensors=98 | W_PATH=out/sycophancy/lora/w.pt
+2026-04-26T19:50:18.414027+0800 | INFO | __main__:<module>:308 - capturing B-side label and A-side activations
+2026-04-26T19:50:29.638005+0800 | INFO | __main__:<module>:332 - captured label=(28, 16, 1024) | clean=(28, 16, 1024) | up=(28, 16, 1024) | attn_tokens=(28, 16, 59, 1024)
+2026-04-26T19:53:43.500018+0800 | INFO | __main__:<module>:591 - built 42 A-side candidates + ceiling
+2026-04-26T19:53:43.500192+0800 | INFO | __main__:lora_weight_tensors:624 - lora_weight_tensors layer=0 dropped: [('model.layers.0.self_attn.o_proj.weight', 'missing-from-LoRA'), ('model.layers.0.mlp.down_proj.weight', 'missing-from-LoRA')]
+2026-04-26T19:54:19.211549+0800 | INFO | __main__:<module>:873 - weight ceiling (dW_left_basis): combined=16.390 oproj=22.521 downproj=10.258 SHOULD: combined ~ d_model/PCS = 128 (or close); oproj/downproj near same. ELSE per-tensor split or null normalization is wrong.
