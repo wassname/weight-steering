@@ -68,7 +68,7 @@ def main(cfg: Cfg) -> None:
         tcfg = TrainCfg(
             model_id=cfg.model, behavior=cfg.behavior, sign=sign,
             adapter=cfg.adapter, rank=cfg.rank, lr=cfg.lr,
-            max_steps=cfg.max_steps, out=cfg.out,
+            epochs=cfg.epochs, max_steps=cfg.max_steps, out=cfg.out,
         )
         paths[sign] = train_adapter(tcfg, ds)
         torch.cuda.empty_cache()
