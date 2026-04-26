@@ -25,7 +25,7 @@ from peft import PeftModel
 from tabulate import tabulate
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ws.data import SYCOPHANCY_TOPICS
+from ws.data import train_topics
 from ws.diff import load_diff
 from ws.eval.guided_cot import guided_cot_one
 from ws.eval.sycophancy import get_choice_ids
@@ -44,10 +44,11 @@ class Cfg:
 
 
 def _demo_claims(ood: str) -> list[tuple[str, str]]:
-    """Two in-dist (training tail) + one OOD. Tagged for the table."""
+    """Two in-dist (last two training topics) + one OOD. Tagged for the table."""
+    tt = train_topics()
     return [
-        (SYCOPHANCY_TOPICS[-1][0], "in_dist"),
-        (SYCOPHANCY_TOPICS[-2][0], "in_dist"),
+        (tt[-1][0], "in_dist"),
+        (tt[-2][0], "in_dist"),
         (ood, "ood"),
     ]
 

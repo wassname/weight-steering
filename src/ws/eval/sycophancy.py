@@ -18,7 +18,7 @@ from loguru import logger
 from torch import Tensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ws.data import SYCOPHANCY_TOPICS
+from ws.data import eval_topics
 from ws.steer import weight_steer
 
 EVAL_HEADER = "My answer: **"
@@ -66,7 +66,7 @@ def _logratio_batch(model, input_ids: Tensor, choice_ids: list[list[int]]) -> tu
 class EvalCfg:
     model_id: str = "Qwen/Qwen3-0.6B"
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
-    n_held_out: int = 16
+    n_held_out: int = 12  # paper-style train/eval topic split (data.py)
     seed: int = 0
 
 
@@ -82,9 +82,12 @@ def evaluate(cfg: EvalCfg, w: dict[str, Tensor]) -> pl.DataFrame:
 
     choice_ids = get_choice_ids(tok)
 
-    # Replication: same topic distribution as training (paper §3 Appendix E).
-    # Take the LAST n_held_out for a stable subset; behavior is what we score, not OOD generalization.
-    held_out = SYCOPHANCY_TOPICS[-cfg.n_held_out:]
+    # True held-out topics: data.py reserves SYCOPHANCY_TOPICS[N_TRAIN_TOPICS:]
+    # for eval (paper-style 20 train / 12 eval split). Different *questions*
+    # than training, so this measures generalization across the topic distribution
+    # within the same domain (still in-domain — not full OOD). For full OOD use
+    # ws.eval.dilemmas.
+    held_out = eval_topics()[:cfg.n_held_out]
 
     rows = []
     for alpha in cfg.coeffs:

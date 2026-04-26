@@ -19,6 +19,25 @@
 > Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_subspace,run_sweep}.py`,
 > `src/ws/eval/{sycophancy,dilemmas}.py`. Outputs to `out/<behavior>/<adapter>/`.
 >
+> **Scope.** Not a strict replication. Now matches paper recipe on data
+> (20 train + 12 eval topics × 5 personas × 10 samples = 1000 pairs;
+> judge filter stubbed, off by default — paper uses GPT-4.1-mini) and
+> LoRA hyperparams (rank 32 / α 16 / lr 1e-5 / warmup 5 / wd 0.01).
+> Deliberate divergences from upstream: no quantized base loading
+> (DoRA/PiSSA/DeLoRA support is uncertain; bf16 fits at 0.6B), no
+> `modules_to_save` for `embed_tokens` / `lm_head`, and a layer slice
+> (LoRA on layers 30%-80%, steering-locus literature) instead of full
+> coverage. The contrastive `θ⁺ − θ⁻` core is preserved.
+>
+> **Initial findings on Qwen3-0.6B** (task 40 / 44). Steering is monotone
+> in α and coherent across α ∈ [-2, +2] (no token salad, pmass ≈ 1.0). The
+> single-token off-policy effect (~+9.4 nats at α=+2) survives a 32-token
+> greedy CoT rollout (margin in the same direction; the gap is the
+> teacher-forcing tax we expected). Cheap to engineer at this scale.
+> Falsified for this dW: alignment with W₀'s top SVD subspace
+> (`ratio_top ≈ 1.0 ± 0.1` across module kinds — SVD-of-W is uninformative).
+> Open: the right basis for dW (work in progress in `notebooks/analyze_diff.py`).
+>
 > Original README from upstream below.
 
 ---

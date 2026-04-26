@@ -47,6 +47,8 @@ def main(cfg: SmokeCfg) -> None:
         smoke=False,  # we set knobs explicitly above
         coeffs=(-1.0, 0.0, 1.0),
         rank=4,  # tiny model, tiny rank
+        n_topics=2,  # smoke: shrink data grid (paper recipe is 20×5)
+        n_personas=1,
     )
     replicate_main(rcfg)
     print("[smoke] OK", flush=True)

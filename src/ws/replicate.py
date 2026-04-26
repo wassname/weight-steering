@@ -32,24 +32,35 @@ class Cfg:
     behavior: str = "sycophancy"
     adapter: str = "lora"
     n_pairs: int = 1000
-    rank: int = 16
-    lr: float = 5e-5
+    rank: int = 32
+    lr: float = 1e-5
     epochs: float = 1.0
     max_steps: int = -1
     out: Path = Path("out")
     smoke: bool = False
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
+    # Smoke knobs to shrink the data grid (defaults = full paper recipe).
+    n_topics: int | None = None
+    n_personas: int | None = None
 
 
 def _maybe_data(cfg: Cfg) -> Dataset:
     data_root = cfg.out / "data"
-    try:
+    behavior_dir = data_root / cfg.behavior
+    if behavior_dir.exists():
         ds = load_pairs(cfg.behavior, root=data_root)
-        logger.info(f"reusing {len(ds)} pairs at {data_root / cfg.behavior}")
+        if len(ds) != cfg.n_pairs:
+            raise ValueError(
+                f"on-disk data at {behavior_dir} has {len(ds)} pairs but "
+                f"cfg.n_pairs={cfg.n_pairs}. Delete the dir to regenerate, or "
+                f"pass --n-pairs {len(ds)}."
+            )
+        logger.info(f"reusing {len(ds)} pairs at {behavior_dir}")
         return ds
-    except (FileNotFoundError, Exception):
-        pass
-    dcfg = DataCfg(model_id=cfg.model, behavior=cfg.behavior, n_pairs=cfg.n_pairs, out=data_root)
+    dcfg = DataCfg(
+        model_id=cfg.model, behavior=cfg.behavior, n_pairs=cfg.n_pairs, out=data_root,
+        n_topics=cfg.n_topics, n_personas=cfg.n_personas,
+    )
     generate_pairs(dcfg)
     return load_pairs(cfg.behavior, root=data_root)
 

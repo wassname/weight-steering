@@ -35,9 +35,13 @@ class TrainCfg:
     behavior: str = "sycophancy"
     sign: str = "pos"  # "pos" | "neg"
     adapter: str = "lora"  # "lora" | "dora" | "pissa" | "delora"
-    rank: int = 16
-    alpha: int | None = None  # defaults to 2 * rank
-    lr: float = 5e-5
+    # Paper / upstream Axolotl: rank=32, alpha=16, lr=1e-5, warmup=5, wd=0.01.
+    # Note alpha/rank=0.5 (paper) vs old default 2.0 — paper is 4x weaker per LoRA.
+    rank: int = 32
+    alpha: int = 16
+    lr: float = 1e-5
+    weight_decay: float = 0.01
+    warmup_steps: int = 5
     epochs: float = 1.0
     max_steps: int = -1
     batch_size: int = 4
@@ -122,7 +126,6 @@ def tokenize_pairs(ds: Dataset, tok, sign: str, max_len: int) -> Dataset:
 
 def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
     torch.manual_seed(cfg.seed)
-    alpha = cfg.alpha or 2 * cfg.rank
 
     tok = AutoTokenizer.from_pretrained(cfg.model_id)
     if tok.pad_token is None:
@@ -136,7 +139,7 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
     layer_idxs = _layers_to_transform(model, cfg.layer_frac_lo, cfg.layer_frac_hi)
     logger.info(f"layer slice [{cfg.layer_frac_lo}, {cfg.layer_frac_hi}] -> "
                 f"{len(layer_idxs)}/{model.config.num_hidden_layers} layers: {layer_idxs}")
-    peft_cfg = make_peft_config(cfg.adapter, cfg.rank, alpha,
+    peft_cfg = make_peft_config(cfg.adapter, cfg.rank, cfg.alpha,
                                 layers_to_transform=layer_idxs)
     model = get_peft_model(model, peft_cfg)
     model.print_trainable_parameters()
@@ -156,6 +159,8 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
         per_device_eval_batch_size=cfg.batch_size * 4,
         gradient_accumulation_steps=cfg.grad_accum,
         learning_rate=cfg.lr,
+        weight_decay=cfg.weight_decay,
+        warmup_steps=cfg.warmup_steps,
         num_train_epochs=cfg.epochs,
         max_steps=cfg.max_steps,
         bf16=True,

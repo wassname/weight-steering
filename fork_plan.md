@@ -39,6 +39,22 @@ Now I'm interested in
 - [ ] **wishlist N**: `notebooks/analyze_diff.py` (.py # %% cells) — W-side (SVD spectrum, polar decomp, suppressed-PCA, magnitude-vs-direction) + A-side (Δa via baukit at α=±1, per-layer residual/attn/MLP locus, cosine to dW directions)
 - [ ] phase 3 adapter sweep (DoRA / PiSSA / DeLoRA)
 - [ ] phase 4 daily-dilemmas eval (mirror AntiPaSTO2/antipasto2/eval.py)
+- [ ] **paper-deltas** (task 18, 16): match data recipe (5+/5- × 10 samples + judge filter) and LoRA hyperparams (rank 32, α 16, lr 1e-5, warmup 5)
+
+## Paper-deltas — what we match, what we deliberately skip
+
+Audit of upstream Axolotl YAMLs vs current code. Tracked as tasks 16 + 18.
+
+| upstream | ours | decision |
+|---|---|---|
+| 20 questions × 5 personas × 10 samples + GPT-4.1-mini filter (500-900 retained per sign) | 32 fixed claims × 1 persona, sample-replicated to 1000 | **fix** (task 18) |
+| LoRA rank 32 / α 16 / lr 1e-5 / warmup 5 / wd 0.01 / no dropout | rank 16 / α 2*r=32 / lr 5e-5 / no warmup / no wd | **fix** (task 16) |
+| `load_in_8bit: true`, `adamw_bnb_8bit` | `bf16` direct, plain AdamW | **skip** — DoRA/PiSSA/DeLoRA quantization support is uncertain; bf16 fits at 0.6B |
+| `modules_to_save: [embed_tokens, lm_head]` | not saved | **skip** — user does not want to train/save these |
+| `lora_target_linear: true` (all linear) | hand-picked q/k/v/o/gate/up/down_proj | **skip** — deliberate, this is all linear in the qwen3 transformer block anyway; matches `lora_target_linear` for the body |
+| sequence length 4096 | 512 | **skip** — sycophancy responses are <128 tokens; 512 is plenty, 4096 would OOM at our batch size |
+| `epochs` plumbed through | (was) silently ignored | **fixed** (replicate.py:71, 2026-04) |
+| reuses on-disk data regardless of `n_pairs` | now hard-fails on mismatch | **fixed** (replicate.py:_maybe_data, 2026-04) |
 
 ---
 
