@@ -359,9 +359,115 @@ through a larger residual-write complement plus read/gate/up paths. The word
 "planning subspace" is probably misleading unless we define it causally (what
 intervention changes behavior), not geometrically (what basis overlaps).
 
+Clarification on the object of search: we were looking for a subspace or
+parameterization that *explains the difference between the positive and
+negative LoRAs*, i.e. a basis in which `dW = θ_pos - θ_neg` becomes simple or
+functionally concentrated. v9/v10 speak directly to that for residual-output
+weights. The answer so far is: not the canonical pretrained-weight bases, not
+the persona-contrast bases, and not the top activation-PCA directions at the
+trained scale. That does not mean no compact causal description exists. It
+means our tested geometric descriptions are not it.
+
+`complement` means the part of the residual-output weight diff left after
+removing the activation-PCA subspace:
+
+$$dW_{complement} = (I - P_{act,K}) dW.$$
+
+If `P_act dW` keeps the behavior, then the small overlap was the right small
+piece. If `(I - P_act) dW` keeps the behavior, then the trained adapter's
+behavior is mostly outside that tested act-PCA subspace. DeLoRA gave the clean
+case: raw projection keeps 7% of residual-write behavior, complement keeps 89%.
+So for the strongest adapter, act-PCA is not an explanation of the learned
+weight diff, though it can still be a useful amplified intervention direction.
+
 ### Artifacts
 
 - nbs/functional_projection_v10.py
 - docs/spec/20260427_v10_functional_projection.md
 - out/sycophancy/v10_functional_projection/{behavior_summary.csv, behavior_by_coeff.csv, spectra_and_projection.csv}
 - out/sycophancy/v10_alpha_sweep/{behavior_summary.csv, behavior_by_coeff.csv, spectra_and_projection.csv}
+
+# v10 wendler-style functional probe 2026-04-27 07:04:57 (dev, a40fd35)
+
+`nbs/v10_llama.py` ports Wendler et al. 2024 ("Do Llamas Work in English?")
+token-energy + logit-lens to the sycophancy LoRA on Qwen3-0.6B. Cheaper than
+v9 (no PCA, no oracle, no SVD per candidate) and asks a different question:
+not "does B span Δh" but "is the (e_yes − e_no) readout axis in B" and "is
+Δh itself readable by lm_head".
+
+### Findings
+
+- **Δh is unreadable at LoRA layers.** Token energy `E²(Δh)` peaks at 0.010
+  in LoRA layers 8..21 vs `E²(clean) ≈ 22` at the same layers. Logit-lens
+  Yes-No on Δh is essentially zero at LoRA layers, rising to peak `0.66 nats`
+  at layer 25 (post-LoRA).
+- **The LoRA writes concepts, not tokens.** Top decoded tokens from Δh at
+  the peak layer:
+  - `+Δh`: " why / reasons / 理由 / supporting / Reasons / 为什么"
+  - `−Δh`: " nonexistent / unauthorized / truthful / 未经"
+  Multilingual concepts of "give-reasons / supportive". The LoRA does not
+  write " Yes" — downstream layers translate the concept into Yes/No.
+- **No rank-8 base-model subspace contains the Yes-No axis.** `cap_yn(B) =
+  ‖P_B(e_yes − e_no)‖² / ‖e_yes − e_no‖²` averaged over LoRA layers:
+  lm_head_read = 0.042 (best A-side, 5× null), TaskDiff_lora_fit = 0.014,
+  write = 0.008, random_null = 0.008 = 8/1024. Even act_oracle (in-sample
+  ceiling) gets 0.014 because Δh is in concept space, not on the readout
+  axis. Sanity passes: `act_oracle.preserved_E ≈ 1.000`,
+  `random_null.cap_yn ≈ PCS/d`.
+
+### Punchline
+
+Searching for "the subspace the LoRA uses" via canonical base-model bases
+or persona-contrast PCA fails not because the hypotheses are crazy, but
+because the LoRA's solution is *concept space* and doesn't sit in any
+low-rank readable basis. The hypothesised directions remain *usable for
+steering* with amplification (v10 functional projection result above) —
+they're just not what the trained model is doing, so you can't use them to
+*interpret* what the LoRA learned.
+
+This decomposes the v9 negative finding into three separate facts that
+v9's PCA-span metric conflated:
+
+1. Δh doesn't carry the Yes-No readout axis at LoRA layers (panel b: ldiff
+   on Δh ≈ 0 in 8..21, peaks only at layer 25).
+2. No rank-8 candidate (incl. lm_head's own SVD) contains the Yes-No axis
+   (panel c: best cap_yn = 0.042).
+3. The mechanism is concept-write at LoRA layers → downstream non-linear
+   translation to Yes/No, matching Wendler's three-phase picture.
+
+### Why we still can't find the concept space
+
+`act_oracle` is post-hoc (defined from Δh itself, in-sample). The closest
+out-of-sample candidate is `TaskDiff_lora_fit` (PCA on FIT-half α=±1
+diffs), which gets `preserved_E = 0.109` at rank 8. Above null but loses
+90% of Δh's readable energy. Why:
+
+- **Rank-8 is too narrow.** The concept "be supportive / give reasons" is
+  not one direction. It spans polite vs blunt, justification vs assertion,
+  multilingual variants. PCA at rank 8 collapses these — silent rank loss.
+  TODO: rerun TaskDiff_lora_fit at rank 32, 64, 128. If `preserved_E`
+  saturates near 1.0 by rank 64, concept space is just higher-dimensional
+  than 8.
+- **Linear span vs cluster.** PCA finds a linear span. If the concept
+  space is a manifold of related-but-not-collinear directions (e.g. one
+  "reasons" axis per topic), span overlap is low even when the cluster is
+  perfectly captured. CHaRS-style per-cluster translations would catch
+  this; v9 marked them "structurally penalized".
+- **Persona contrast is the wrong concept.** TaskDiff_contrast scores
+  cap_yn = 0.012 because persona ≠ sycophancy. Persona induces style;
+  sycophancy is more specific (justify-the-user's-claim). Need
+  concept-anchored data: contrast prompts that elicit " because / 因为 /
+  supporting" against bland answers, build basis from that.
+- **Wrong layer.** Linear probes at LoRA layers see concept-space writes;
+  Yes/No is only readable at layer 25. A Yes-No probe trained at layer 25
+  and back-projected through residual paths might recover the concept axis
+  from the *receiving* end.
+- **Wrong tool.** PCA is unsupervised; DAS (Distributed Alignment Search)
+  learns a rotation that isolates task-causal directions, doesn't assume
+  low rank. SAE features could expose a "supporting/reasons" feature
+  directly. Either is the principled next step.
+
+### Artifacts
+
+- nbs/v10_llama.py
+- out/sycophancy/lora/v10/{v10_wendler_metrics.png, v10_wendler_metrics.pdf, v10_table.tsv, v10_caption.md, v10_per_layer.csv}

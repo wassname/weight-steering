@@ -19,24 +19,118 @@
 > Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_subspace,run_sweep}.py`,
 > `src/ws/eval/{sycophancy,dilemmas}.py`. Outputs to `out/<behavior>/<adapter>/`.
 >
-> **Scope.** Not a strict replication. Now matches paper recipe on data
+> **Scope.** Not a strict replication. Now matches paper-style recipe on data
 > (20 train + 12 eval topics × 5 personas × 10 samples = 1000 pairs;
 > judge filter stubbed, off by default — paper uses GPT-4.1-mini) and
-> LoRA hyperparams (rank 32 / α 16 / lr 1e-5 / warmup 5 / wd 0.01).
+> current PEFT hyperparams (rank 32 / LoRA α 64 / lr 2e-4 / warmup 5 /
+> wd 0.01 / seed 0 / one epoch).
 > Deliberate divergences from upstream: no quantized base loading
 > (DoRA/PiSSA/DeLoRA support is uncertain; bf16 fits at 0.6B), no
 > `modules_to_save` for `embed_tokens` / `lm_head`, and a layer slice
 > (LoRA on layers 30%-80%, steering-locus literature) instead of full
 > coverage. The contrastive `θ⁺ − θ⁻` core is preserved.
 >
-> **Initial findings on Qwen3-0.6B** (task 40 / 44). Steering is monotone
-> in α and coherent across α ∈ [-2, +2] (no token salad, pmass ≈ 1.0). The
-> single-token off-policy effect (~+9.4 nats at α=+2) survives a 32-token
-> greedy CoT rollout (margin in the same direction; the gap is the
-> teacher-forcing tax we expected). Cheap to engineer at this scale.
-> Falsified for this dW: alignment with W₀'s top SVD subspace
-> (`ratio_top ≈ 1.0 ± 0.1` across module kinds — SVD-of-W is uninformative).
-> Open: the right basis for dW (work in progress in `notebooks/analyze_diff.py`).
+> **Initial finding on Qwen3-0.6B.** Weight steering works cheaply at this
+> scale, but the useful adapter parameterization and the interpretable
+> subspace are separate questions. The current best raw adapter is DeLoRA;
+> PiSSA is the cleaner stable baseline; PCA-style planning-subspace overlap
+> does not explain the trained behavior.
+
+## Current internal findings (N=1; exploratory)
+
+These numbers are **single-seed, single-model research notes**, not a full
+benchmark. All rows below use `Qwen/Qwen3-0.6B`, seed 0, shared generated
+sycophancy data, PEFT adapters trained for one epoch on layers 8-21 (30%-80%
+of 28 layers) except IA3, whose PEFT config does not support
+`layers_to_transform` and therefore touches all layers. Target modules for
+LoRA-family adapters are `q/k/v/o/gate/up/down_proj`.
+
+### What was measured
+
+- **Sycophancy ID eval:** held-out sycophancy Yes/No prompts, 12 eval rows per
+    coefficient. Metric is `mean_logratio = log p(Yes) - log p(No)`; larger
+    means more sycophantic agreement. `pmass` is probability mass on Yes/No, a
+    sanity check that the model is answering in-format.
+- **Daily dilemmas OOD eval:** `wassname/daily_dilemmas-self-honesty`,
+    `honesty_eval`, first 100 dilemmas = 200 action rows per nonzero coefficient.
+    Metric is `logratio_honesty = (log p(Yes) - log p(No)) * honesty_label`, so
+    larger means more honest. Tables below use **base persona only**. A previous
+    summary accidentally averaged `base@0` with the AxBench `honest_engineer`
+    persona baseline; `cross_adapter_v9.py` now reads `dilemmas_per_row.csv` and
+    filters `persona == "base"`.
+- **Projection diagnostic:** not a benchmark. It decomposes residual-output
+    weights (`o_proj`, `down_proj`) into the part inside a post-hoc activation
+    PCA subspace (`project_act_block`) and its orthogonal remainder
+    (`complement_act_block`) to test whether low overlap hides the load-bearing
+    steering component.
+
+### Adapter comparison
+
+Sycophancy in-distribution steering:
+
+| adapter | spread `α=+2 minus -2` | delta `α=+1 minus 0` | min pmass | read |
+|---------|------------------------:|----------------------:|----------:|------|
+| delora  | **+23.85** | **+9.80** | 0.788 | strongest raw, but saturates at `α=2` |
+| pissa   | +17.40 | +6.00 | 0.999 | strongest clean/stable baseline |
+| dora    | +9.76 | +2.64 | 1.000 | decent |
+| oft     | +7.24 | +1.99 | 1.000 | weaker |
+| lora    | +4.09 | +1.00 | 1.000 | weak in this run |
+| ia3     | +0.86 | +0.26 | 1.000 | near no-op |
+
+Daily-dilemmas OOD honesty transfer, base persona only:
+
+| adapter | `α=-1` | `α=0` | `α=+1` | delta `+1 minus 0` | pmass @ `+1` |
+|---------|-------:|------:|-------:|--------------------:|-------------:|
+| delora  | -0.29 | 1.32 | 2.02 | **+0.70** | 0.947 |
+| dora    | 0.73 | 1.32 | 1.72 | +0.41 | 0.940 |
+| pissa   | 0.44 | 1.32 | 1.69 | +0.37 | 0.980 |
+| oft     | 1.09 | 1.32 | 1.57 | +0.26 | 0.932 |
+| lora    | 1.09 | 1.32 | 1.55 | +0.23 | 0.933 |
+| ia3     | 1.29 | 1.32 | 1.35 | +0.03 | 0.938 |
+
+Takeaway: DeLoRA is the best raw steerer on both sycophancy and daily
+dilemmas. PiSSA is still the best "clean" adapter if you penalize DeLoRA's
+`α=2` saturation on the sycophancy eval.
+
+### Subspace/projection lesson
+
+The original question was: can we find the subspace or parameterization that
+explains the difference between the positive and negative LoRAs? So far:
+
+- Canonical low-rank bases from pretrained weights, persona contrasts, and
+    activation PCA all have low overlap with the LoRA weight oracle: about
+    1-8% across adapter families and LoRA layers.
+- Block-local activation PCA did not rescue this. The issue is not just that
+    cumulative activations mix upstream layers.
+- A functional projection test says the PCA activation directions can be
+    **potent if amplified**, but the trained adapter's behavior is mostly not
+    carried by that projected component at its learned scale.
+
+Projection diagnostic at K=32 on daily dilemmas (40 dilemmas / 80 rows; this
+is an ablation, not a full benchmark):
+
+| adapter | full Δ | residual-write Δ | raw projection / residual | normmatched projection / residual | complement / residual | read |
+|---------|-------:|-----------------:|--------------------------:|----------------------------------:|----------------------:|------|
+| delora  | +0.628 | +0.844 | 0.07 | 0.30 | 0.89 | trained behavior mostly outside act-PCA subspace |
+| pissa   | +0.373 | +0.242 | 0.47 | 1.14 | 0.64 | mixed: act-PCA is functional, not sole carrier |
+| oft     | +0.216 | +0.148 | -0.01 | 1.57 | 0.69 | act-PCA direction potent only after amplification |
+
+Here **complement** means the residual-output part of `dW` after removing the
+activation-PCA subspace:
+
+$$dW_{\text{complement}} = (I - P_{\text{act},K}) dW.$$
+
+So if the complement keeps steering, then the trained adapter's effect is not
+mainly inside the tested activation-PCA subspace. For DeLoRA, the complement
+keeps 89% of residual-write behavior while the raw projection keeps 7%, which
+is the cleanest evidence that `act_oracle` is an intervention target, not an
+explanation of what the trained adapter learned.
+
+Current best interpretation: "planning subspace" should be defined causally
+(what intervention changes behavior), not geometrically (what PCA basis
+overlaps `dW`). The LoRA appears to write concept-space directions that
+downstream layers translate into Yes/No or honesty behavior; a low-rank
+readable basis does not capture the full mechanism.
 >
 > Original README from upstream below.
 
