@@ -17,6 +17,7 @@ import tyro
 from loguru import logger
 from tabulate import tabulate
 
+from ws._log import final_summary, get_argv, setup_logging
 from ws.diff import load_base_state, load_diff
 from ws.subspace import alignment_table, summarize_by_kind
 
@@ -32,6 +33,7 @@ class Cfg:
 
 
 def main(cfg: Cfg) -> None:
+    setup_logging("run_subspace")
     diff_path = cfg.out / cfg.behavior / cfg.adapter / "w.pt"
     if not diff_path.exists():
         raise FileNotFoundError(f"no diff at {diff_path}; run replicate first")
@@ -64,6 +66,26 @@ def main(cfg: Cfg) -> None:
             floatfmt="+.3f",
             showindex=False,
         )
+    )
+
+    # BLUF: pick the largest ratio_top across param-kinds as headline.
+    sp = summary.to_pandas()
+    best = sp.iloc[sp["mean_ratio_top"].abs().idxmax()]
+    rt, rw = float(best["mean_ratio_top"]), float(best["mean_ratio_weak"])
+    cue = "🟢" if (rt > 1.2 or rw > 1.2) else ("🟡" if max(rt, rw) > 1.0 else "🔴")
+    final_summary(
+        out=out_dir / "subspace_summary.csv",
+        argv=get_argv(),
+        main_metric=f"max_ratio_top={rt:+.3f} max_ratio_weak={rw:+.3f} kind={best['kind']}",
+        cue=cue,
+        table_rows=[[
+            f"{rt:+.3f}", f"{rw:+.3f}", best["kind"],
+            cfg.behavior, cfg.adapter, cfg.model,
+            f"k_frac={cfg.k_frac},weak_frac={cfg.weak_frac}",
+            str(out_dir / "subspace_summary.csv"),
+        ]],
+        headers=["ratio_top", "ratio_weak", "kind", "behavior", "adapter", "model", "flags", "out"],
+        floatfmt="",
     )
 
 

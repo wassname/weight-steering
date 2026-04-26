@@ -25,6 +25,7 @@ from peft import PeftModel
 from tabulate import tabulate
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ws._log import final_summary, get_argv, setup_logging
 from ws.data import train_topics
 from ws.diff import load_diff
 from ws.eval.guided_cot import guided_cot_one
@@ -145,6 +146,7 @@ def phase_a2(cfg: Cfg, claims: list[tuple[str, str]], tok) -> pl.DataFrame:
 
 
 def main(cfg: Cfg) -> None:
+    setup_logging("run_demo")
     tok = AutoTokenizer.from_pretrained(cfg.model)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
@@ -157,6 +159,30 @@ def main(cfg: Cfg) -> None:
     out_dir = cfg.out / cfg.behavior / cfg.adapter
     df.write_csv(out_dir / "demo_guided_cot.csv")
     logger.info(f"saved demo table to {out_dir / 'demo_guided_cot.csv'}")
+
+    # BLUF: in-dist margin spread across alpha + min pmass
+    pdf = df.to_pandas()
+    indist = pdf[pdf["kind"] == "in_dist"]
+    if len(indist):
+        spread = float(indist["margin"].max() - indist["margin"].min())
+    else:
+        spread = float("nan")
+    pmin = float(pdf["pmass"].min())
+    cue = "🟢" if (spread > 1.0 and pmin > 0.99) else ("🟡" if spread > 0.3 else "🔴")
+    final_summary(
+        out=out_dir / "demo_guided_cot.csv",
+        argv=get_argv(),
+        main_metric=f"margin_spread={spread:+.3f} pmass_min={pmin:.3f}",
+        cue=cue,
+        table_rows=[[
+            f"{spread:+.3f}", f"{pmin:.3f}",
+            cfg.behavior, cfg.adapter, cfg.model,
+            f"n_think={cfg.n_think},coeffs={cfg.coeffs}",
+            str(out_dir / "demo_guided_cot.csv"),
+        ]],
+        headers=["margin_spread", "pmass_min", "behavior", "adapter", "model", "flags", "out"],
+        floatfmt="",
+    )
 
 
 if __name__ == "__main__":

@@ -44,6 +44,8 @@ Interpretation:
 """
 
 # %%
+import os
+import sys
 from pathlib import Path
 
 import polars as pl
@@ -56,6 +58,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ws.data import SYCOPHANCY_TOPICS
 from ws.diff import load_diff
 from ws.steer import weight_steer
+
+# token-efficient logging: plain message format, tqdm-safe; verbose to file
+logger.remove()
+logger.add(sys.stdout, level=os.environ.get("LOG_LEVEL", "INFO"), colorize=False, format="{message}")
+Path("logs").mkdir(exist_ok=True)
+logger.add("logs/analyze_diff_v2.verbose.log", level="DEBUG",
+           format="{time} | {level} | {name}:{function}:{line} - {message}")
 
 torch.set_grad_enabled(False)
 
@@ -387,3 +396,54 @@ print(
     )
 )
 angle_df.write_csv(OUT_DIR / "analyze_diff_v2_taskdiff_vs_lmhead_angles.csv")
+
+
+# %% [markdown]
+# ## Final summary (BLUF for log readers)
+#
+# Last ~30 lines of stdout: cue emoji + main metric, then argv/out paths, then
+# a tight TSV result table for a downstream LLM/agent to read.
+
+# %%
+active = df.filter(pl.col("layer") >= 8)
+active_summary = (
+    active.group_by("subspace")
+    .agg(
+        pl.col("ratio").mean().alias("mean_ratio_active"),
+        pl.col("ratio").max().alias("max_ratio"),
+        pl.col("layer").sort_by("ratio").last().alias("peak_layer"),
+    )
+    .sort("mean_ratio_active", descending=True)
+)
+td_mean = active_summary.filter(pl.col("subspace") == "taskdiff")["mean_ratio_active"][0]
+lm_mean = active_summary.filter(pl.col("subspace") == "lm_head_read")["mean_ratio_active"][0]
+ratio_td_lm = td_mean / lm_mean if lm_mean > 0 else float("inf")
+angles_active = angle_df.filter(pl.col("layer") >= 8)
+max_cos_active = angles_active["max_cos"].max() if angles_active.height else float("nan")
+
+cue = "🟢" if (td_mean >= 5.0 and ratio_td_lm >= 3.0) else ("🟡" if td_mean >= 2.0 else "🔴")
+
+print()
+print(f"out: {OUT_DIR}/analyze_diff_v2_concentration_summary.csv")
+print(f"argv: nbs/analyze_diff_v2.py model={MODEL_ID} w={W_PATH} pcs={PCS} min_overlap={MIN_OVERLAP}")
+print(
+    f"main metric: {cue} taskdiff_active_mean={td_mean:.2f} | "
+    f"lm_head_read_active_mean={lm_mean:.2f} | "
+    f"taskdiff/lm_head_read={ratio_td_lm:.2f} | "
+    f"max_cos(TaskDiff,lm_head_read)_active={max_cos_active:.2f}"
+)
+print()
+print(
+    "SHOULD: cue=🟢 means taskdiff dominates lm_head_read by >=3x AND active-mean>=5; "
+    "🟡 means taskdiff active-mean>=2 (weak); 🔴 means signal is diffuse or rides readout. "
+    "max_cos<0.7 confirms TaskDiff is geometrically distinct from the unembedding readout."
+)
+print(
+    tabulate(
+        active_summary.to_pandas(),
+        headers=["subspace", "mean_ratio↑", "max_ratio", "peak_layer"],
+        tablefmt="tsv",
+        floatfmt="+.2f",
+        showindex=False,
+    )
+)

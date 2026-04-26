@@ -17,6 +17,7 @@ from tabulate import tabulate
 
 from transformers import AutoTokenizer
 
+from ws._log import final_summary, get_argv, setup_logging
 from ws.data import DataCfg, generate_pairs, load_pairs
 from ws.diff import compute_diff, load_base_state, load_delta, save_diff
 from ws.eval.sycophancy import EvalCfg, evaluate, summarize
@@ -65,6 +66,7 @@ def _maybe_data(cfg: Cfg) -> Dataset:
 
 
 def main(cfg: Cfg) -> None:
+    setup_logging("replicate")
     ds = _maybe_data(cfg)
 
     # Train pos and neg.
@@ -128,6 +130,31 @@ def main(cfg: Cfg) -> None:
     phase_a1(dcfg, claims, tok)
     demo_df = phase_a2(dcfg, claims, tok)
     demo_df.write_csv(out_dir / "demo_guided_cot.csv")
+
+    # BLUF: headline = max margin across alpha sweep on in_dist claim
+    sp = summary.to_pandas()
+    # mean_logratio at largest positive coeff
+    top = sp.sort_values("coeff").iloc[-1]
+    bot = sp.sort_values("coeff").iloc[0]
+    spread = float(top["mean_logratio"]) - float(bot["mean_logratio"])
+    pmin = float(sp["mean_pmass"].min()) if "mean_pmass" in sp.columns else float("nan")
+    cue = "🟢" if (spread > 1.0 and pmin > 0.95) else ("🟡" if spread > 0.3 else "🔴")
+    final_summary(
+        out=out_dir / "eval_summary.csv",
+        argv=get_argv(),
+        main_metric=f"logratio_spread={spread:+.3f} pmass_min={pmin:.3f}",
+        cue=cue,
+        table_rows=[[
+            f"{spread:+.3f}", f"{pmin:.3f}",
+            f"{float(top['coeff']):+.1f}", f"{float(top['mean_logratio']):+.3f}",
+            cfg.behavior, cfg.adapter, cfg.model,
+            f"r{cfg.rank},lr{cfg.lr},ep{cfg.epochs}",
+            str(out_dir / "eval_summary.csv"),
+        ]],
+        headers=["logratio_spread", "pmass_min", "coeff_top", "logratio_top",
+                 "behavior", "adapter", "model", "flags", "out"],
+        floatfmt="",
+    )
 
 
 if __name__ == "__main__":
