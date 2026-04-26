@@ -29,26 +29,24 @@ from ws.replicate import Cfg, main as replicate_main
 @dataclass
 class SmokeCfg:
     model: str = "katuni4ka/tiny-random-qwen3"  # or any tiny-random LM
-    n_pairs: int = 4
     max_steps: int = 2
     out: Path = Path("out/smoke")
     adapter: str = "lora"
 
 
 def main(cfg: SmokeCfg) -> None:
-    print(f"[smoke] model={cfg.model} adapter={cfg.adapter} n_pairs={cfg.n_pairs} max_steps={cfg.max_steps}")
+    print(f"[smoke] model={cfg.model} adapter={cfg.adapter} max_steps={cfg.max_steps}")
     rcfg = Cfg(
         model=cfg.model,
         behavior="sycophancy",
         adapter=cfg.adapter,
-        n_pairs=cfg.n_pairs,
         max_steps=cfg.max_steps,
         out=cfg.out,
-        smoke=False,  # we set knobs explicitly above
         coeffs=(-1.0, 0.0, 1.0),
-        rank=4,  # tiny model, tiny rank
-        n_topics=2,  # smoke: shrink data grid (paper recipe is 20×5)
+        rank=4,        # tiny model, tiny rank
+        n_topics=2,    # 2×1×2 = 4 pairs
         n_personas=1,
+        n_samples=2,
     )
     replicate_main(rcfg)
     print("[smoke] OK", flush=True)

@@ -8,8 +8,7 @@ Recipe (paper §3, Appendix C, persona-vectors recipe):
      unconditionally on the (response_pos, response_neg) text alone.
 
 Paper sizes: 20 train questions × 5 personas × 10 samples = 1000 pairs raw,
-GPT-4.1-mini judge-filtered to 500-900. We default to no judge (cheap), with
-a `judge` flag stub for later.
+GPT-4.1-mini judge-filtered to 500-900. We skip the judge for now.
 
 Output columns:
   prompt, response_pos, response_neg, sys_prompt_pos, sys_prompt_neg,
@@ -106,16 +105,14 @@ def eval_topics() -> list[tuple[str, str]]:
 class DataCfg:
     model_id: str = "Qwen/Qwen3-0.6B"
     behavior: str = "sycophancy"
-    n_pairs: int = 1000
+    # Paper recipe: 20 × 5 × 10 = 1000 pairs. Smoke shrinks the grid (e.g. 2×1×2).
+    n_topics: int = N_TRAIN_TOPICS
+    n_personas: int = 5
+    n_samples: int = 10
     out: Path = Path("out/data")
     max_new_tokens: int = 96
     temperature: float = 0.8
     seed: int = 0
-    judge: bool = False  # GPT-4.1-mini filter (paper §3); requires OPENAI_API_KEY.
-    # Smoke overrides: shrink the topic/persona grid for fast pipeline checks.
-    # None = use full paper recipe (20 topics × 5 personas).
-    n_topics: int | None = None
-    n_personas: int | None = None
 
 
 def _personas(behavior: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -144,8 +141,7 @@ def _build_specs(topics, n_personas: int, n_samples: int):
 
 
 @torch.no_grad()
-def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int,
-         temperature: float, generator: torch.Generator):
+def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int, temperature: float):
     msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}]
     text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
     inputs = tok(text, return_tensors="pt").to(model.device)
@@ -160,41 +156,29 @@ def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int,
     return tok.decode(gen, skip_special_tokens=True).strip()
 
 
-def _judge_filter(rows: list[dict], behavior: str) -> list[dict]:
-    """GPT-4.1-mini judge: keep rows where r_pos exhibits behavior AND r_neg does not.
-
-    Paper §3: judge is GPT-4.1-mini, retains only clear-behavior rows.
-    Filter rate in paper: 1000 → 500-900. Not implemented in this fork yet —
-    use n_pairs scaled up if you want the same effective dataset size.
-    """
-    raise NotImplementedError(
-        "judge filter not implemented; pass --no-judge or expand if needed. "
-        "Paper recipe: GPT-4.1-mini, prompts in Appendix D.3."
-    )
+# TODO judge filter: paper §3 uses GPT-4.1-mini to drop rows where r_pos doesn't
+# exhibit the behavior or r_neg still does. Filter rate ~ 50-90%. Implement when
+# we want strict replication; until then the contrastive prompts do most of the work.
 
 
 def generate_pairs(cfg: DataCfg) -> Path:
-    rng = torch.Generator().manual_seed(cfg.seed)
-    sys_pos_list, sys_neg_list = _personas(cfg.behavior)
-    if len(sys_pos_list) != len(sys_neg_list):
-        raise ValueError(f"persona count mismatch: pos={len(sys_pos_list)} neg={len(sys_neg_list)}")
-    n_personas = cfg.n_personas if cfg.n_personas is not None else len(sys_pos_list)
-    sys_pos_list = sys_pos_list[:n_personas]
-    sys_neg_list = sys_neg_list[:n_personas]
+    sys_pos_all, sys_neg_all = _personas(cfg.behavior)
+    if len(sys_pos_all) < cfg.n_personas or len(sys_neg_all) < cfg.n_personas:
+        raise ValueError(f"need {cfg.n_personas} personas, have pos={len(sys_pos_all)} neg={len(sys_neg_all)}")
+    sys_pos_list, sys_neg_list = sys_pos_all[:cfg.n_personas], sys_neg_all[:cfg.n_personas]
     all_topics = _topics(cfg.behavior)
-    n_topics = cfg.n_topics if cfg.n_topics is not None else len(all_topics)
-    topics = all_topics[:n_topics]
+    if len(all_topics) < cfg.n_topics:
+        raise ValueError(f"need {cfg.n_topics} topics, have {len(all_topics)}")
+    topics = all_topics[:cfg.n_topics]
 
-    # Solve n_samples to roughly match cfg.n_pairs. Paper: 20 × 5 × 10 = 1000.
-    n_samples = max(1, round(cfg.n_pairs / (len(topics) * n_personas)))
-    specs = _build_specs(topics, n_personas, n_samples)
-    actual_n = len(specs)
-    if actual_n != cfg.n_pairs:
-        logger.warning(f"n_pairs={cfg.n_pairs} -> actual {actual_n} "
-                       f"(topics={len(topics)} × personas={n_personas} × samples={n_samples})")
+    specs = _build_specs(topics, cfg.n_personas, cfg.n_samples)
+    n = len(specs)
+    logger.info(f"data grid: {cfg.n_topics} topics × {cfg.n_personas} personas × {cfg.n_samples} samples = {n} pairs")
 
-    # Shuffle so training sees diverse (topic, persona) order.
-    perm = torch.randperm(actual_n, generator=rng).tolist()
+    # Single seed at start; spec list order is deterministic given cfg.seed.
+    torch.manual_seed(cfg.seed)
+    rng = torch.Generator().manual_seed(cfg.seed)
+    perm = torch.randperm(n, generator=rng).tolist()
     specs = [specs[i] for i in perm]
 
     tok = AutoTokenizer.from_pretrained(cfg.model_id)
@@ -209,14 +193,8 @@ def generate_pairs(cfg: DataCfg) -> Path:
     for i, spec in enumerate(specs):
         sys_pos = sys_pos_list[spec["persona_idx"]]
         sys_neg = sys_neg_list[spec["persona_idx"]]
-        # Reseed per-spec so r_pos and r_neg use independent samples but the
-        # full run is reproducible. Hash combines spec coords + cfg.seed.
-        seed_pos = hash(("pos", cfg.seed, spec["topic_idx"], spec["persona_idx"], spec["sample_idx"])) % (2**31)
-        seed_neg = hash(("neg", cfg.seed, spec["topic_idx"], spec["persona_idx"], spec["sample_idx"])) % (2**31)
-        torch.manual_seed(seed_pos)
-        r_pos = _gen(model, tok, sys_pos, spec["prompt"], cfg.max_new_tokens, cfg.temperature, rng)
-        torch.manual_seed(seed_neg)
-        r_neg = _gen(model, tok, sys_neg, spec["prompt"], cfg.max_new_tokens, cfg.temperature, rng)
+        r_pos = _gen(model, tok, sys_pos, spec["prompt"], cfg.max_new_tokens, cfg.temperature)
+        r_neg = _gen(model, tok, sys_neg, spec["prompt"], cfg.max_new_tokens, cfg.temperature)
         rows.append({
             "prompt": spec["prompt"],
             "response_pos": r_pos,
@@ -229,12 +207,7 @@ def generate_pairs(cfg: DataCfg) -> Path:
             "behavior": cfg.behavior,
         })
         if (i + 1) % 25 == 0:
-            logger.info(f"generated {i + 1}/{actual_n}")
-
-    if cfg.judge:
-        logger.info("applying judge filter...")
-        rows = _judge_filter(rows, cfg.behavior)
-        logger.info(f"judge kept {len(rows)}/{actual_n} rows")
+            logger.info(f"generated {i + 1}/{n}")
 
     ds = Dataset.from_list(rows)
     out_dir = cfg.out / cfg.behavior

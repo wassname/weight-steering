@@ -21,7 +21,7 @@ smoke *ARGS:
 
 # Generate +/- pair data for a behavior. Writes to out/data/{behavior}/.
 data:
-    uv run python -m ws.data --model {{model}} --behavior {{behavior}} --n-pairs 1000
+    uv run python -m ws.data --model {{model}} --behavior {{behavior}}
 
 # Train a single adapter (positive or negative). Pos/neg controls system prompt at gen time.
 train sign="pos":
@@ -55,7 +55,7 @@ adapter-sweep:
 # Replicate: full phase-1 pipeline (data -> train pos -> train neg -> diff -> eval).
 replicate:
     uv run python -m ws.replicate --model {{model}} --behavior {{behavior}} \
-        --adapter {{adapter}} --n-pairs 1000
+        --adapter {{adapter}}
 
 # Phase A demo: adapter coherence + guided-CoT under steered diff. Reads existing artifacts.
 demo:

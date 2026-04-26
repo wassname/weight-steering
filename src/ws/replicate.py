@@ -1,13 +1,12 @@
 """Phase 1 entrypoint: data -> train pos -> train neg -> diff -> eval.
 
 Usage:
-    uv run python -m scripts.replicate --model Qwen/Qwen3-0.6B --behavior sycophancy --adapter lora
-    uv run python -m scripts.replicate --smoke   # 32 pairs, 20 steps, ~5 min
+    uv run python -m ws.replicate --model Qwen/Qwen3-0.6B --behavior sycophancy --adapter lora
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -31,46 +30,41 @@ class Cfg:
     model: str = "Qwen/Qwen3-0.6B"
     behavior: str = "sycophancy"
     adapter: str = "lora"
-    n_pairs: int = 1000
+    # Data grid (paper recipe: 20 × 5 × 10 = 1000). Smoke shrinks via CLI.
+    n_topics: int = 20
+    n_personas: int = 5
+    n_samples: int = 10
     rank: int = 32
     lr: float = 1e-5
     epochs: float = 1.0
     max_steps: int = -1
     out: Path = Path("out")
-    smoke: bool = False
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
-    # Smoke knobs to shrink the data grid (defaults = full paper recipe).
-    n_topics: int | None = None
-    n_personas: int | None = None
 
 
 def _maybe_data(cfg: Cfg) -> Dataset:
     data_root = cfg.out / "data"
     behavior_dir = data_root / cfg.behavior
+    expected = cfg.n_topics * cfg.n_personas * cfg.n_samples
     if behavior_dir.exists():
         ds = load_pairs(cfg.behavior, root=data_root)
-        if len(ds) != cfg.n_pairs:
+        if len(ds) != expected:
             raise ValueError(
                 f"on-disk data at {behavior_dir} has {len(ds)} pairs but "
-                f"cfg.n_pairs={cfg.n_pairs}. Delete the dir to regenerate, or "
-                f"pass --n-pairs {len(ds)}."
+                f"grid {cfg.n_topics}×{cfg.n_personas}×{cfg.n_samples}={expected}. "
+                f"Delete the dir to regenerate."
             )
         logger.info(f"reusing {len(ds)} pairs at {behavior_dir}")
         return ds
     dcfg = DataCfg(
-        model_id=cfg.model, behavior=cfg.behavior, n_pairs=cfg.n_pairs, out=data_root,
-        n_topics=cfg.n_topics, n_personas=cfg.n_personas,
+        model_id=cfg.model, behavior=cfg.behavior, out=data_root,
+        n_topics=cfg.n_topics, n_personas=cfg.n_personas, n_samples=cfg.n_samples,
     )
     generate_pairs(dcfg)
     return load_pairs(cfg.behavior, root=data_root)
 
 
 def main(cfg: Cfg) -> None:
-    if cfg.smoke:
-        cfg.n_pairs = 32
-        cfg.max_steps = 20
-        cfg.coeffs = (-1.0, 0.0, 1.0)
-
     ds = _maybe_data(cfg)
 
     # Train pos and neg.
