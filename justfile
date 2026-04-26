@@ -57,6 +57,10 @@ replicate:
     uv run python -m ws.replicate --model {{model}} --behavior {{behavior}} \
         --adapter {{adapter}} --n-pairs 1000
 
+# Phase A demo: adapter coherence + guided-CoT under steered diff. Reads existing artifacts.
+demo:
+    uv run python -m ws.run_demo --model {{model}} --behavior {{behavior}} --adapter {{adapter}}
+
 setup:
     uv sync
 

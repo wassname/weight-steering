@@ -43,34 +43,52 @@ class TrainCfg:
     batch_size: int = 4
     grad_accum: int = 4
     max_len: int = 512
+    # Layer-fraction slice for LoRA targets. Steering literature (RepE/ITI/AntiPaSTO)
+    # finds behavior lives in middle-to-late layers; full-coverage (0.0-1.0) wastes
+    # rank on early layers that mostly tokenize. 0.3-0.8 matches the AntiPaSTO range.
+    layer_frac_lo: float = 0.3
+    layer_frac_hi: float = 0.8
     out: Path = Path("out")
     seed: int = 0
 
 
-def make_peft_config(adapter: str, rank: int, alpha: int):
+def _layers_to_transform(model, lo: float, hi: float) -> list[int]:
+    n = model.config.num_hidden_layers
+    a, b = int(round(lo * n)), int(round(hi * n))
+    if a >= b:
+        raise ValueError(f"empty layer slice: lo={lo} hi={hi} -> [{a}, {b}) of {n}")
+    return list(range(a, b))
+
+
+def make_peft_config(adapter: str, rank: int, alpha: int,
+                     layers_to_transform: list[int] | None = None):
+    extra = {}
+    if layers_to_transform is not None:
+        extra["layers_to_transform"] = layers_to_transform
     if adapter == "lora":
         return LoraConfig(
             task_type=TaskType.CAUSAL_LM, r=rank, lora_alpha=alpha,
             target_modules=LINEAR_TARGETS, lora_dropout=0.0, bias="none",
+            **extra,
         )
     if adapter == "dora":
         return LoraConfig(
             task_type=TaskType.CAUSAL_LM, r=rank, lora_alpha=alpha,
             target_modules=LINEAR_TARGETS, lora_dropout=0.0, bias="none",
-            use_dora=True,
+            use_dora=True, **extra,
         )
     if adapter == "pissa":
         return LoraConfig(
             task_type=TaskType.CAUSAL_LM, r=rank, lora_alpha=alpha,
             target_modules=LINEAR_TARGETS, lora_dropout=0.0, bias="none",
-            init_lora_weights="pissa",
+            init_lora_weights="pissa", **extra,
         )
     if adapter == "delora":
         # peft >= 0.13. Imported lazily so older peft still works for the others.
         from peft import DeloraConfig  # type: ignore
         return DeloraConfig(
             task_type=TaskType.CAUSAL_LM, r=rank,
-            target_modules=LINEAR_TARGETS,
+            target_modules=LINEAR_TARGETS, **extra,
         )
     raise ValueError(f"unknown adapter: {adapter}")
 
@@ -115,11 +133,19 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
     )
     model.config.use_cache = False
 
-    peft_cfg = make_peft_config(cfg.adapter, cfg.rank, alpha)
+    layer_idxs = _layers_to_transform(model, cfg.layer_frac_lo, cfg.layer_frac_hi)
+    logger.info(f"layer slice [{cfg.layer_frac_lo}, {cfg.layer_frac_hi}] -> "
+                f"{len(layer_idxs)}/{model.config.num_hidden_layers} layers: {layer_idxs}")
+    peft_cfg = make_peft_config(cfg.adapter, cfg.rank, alpha,
+                                layers_to_transform=layer_idxs)
     model = get_peft_model(model, peft_cfg)
     model.print_trainable_parameters()
 
-    train_ds = tokenize_pairs(ds, tok, cfg.sign, cfg.max_len)
+    # 10% held-out split so eval_loss is logged alongside train_loss.
+    # Lets us see: did it converge (flat), undertrain (still falling), or overfit (U-shape)?
+    split = ds.train_test_split(test_size=0.1, seed=cfg.seed)
+    train_ds = tokenize_pairs(split["train"], tok, cfg.sign, cfg.max_len)
+    val_ds = tokenize_pairs(split["test"], tok, cfg.sign, cfg.max_len)
 
     out_dir = cfg.out / cfg.behavior / cfg.adapter / cfg.sign
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -127,12 +153,15 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
     args = TrainingArguments(
         output_dir=str(out_dir),
         per_device_train_batch_size=cfg.batch_size,
+        per_device_eval_batch_size=cfg.batch_size * 4,
         gradient_accumulation_steps=cfg.grad_accum,
         learning_rate=cfg.lr,
         num_train_epochs=cfg.epochs,
         max_steps=cfg.max_steps,
         bf16=True,
         logging_steps=5,
+        eval_strategy="steps",
+        eval_steps=10,
         save_strategy="no",
         report_to="none",
         seed=cfg.seed,
@@ -141,7 +170,10 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
 
     # Pads input_ids with pad_token, labels with -100 so masked positions stay ignored.
     collator = DataCollatorForSeq2Seq(tok, padding=True, label_pad_token_id=-100)
-    trainer = Trainer(model=model, args=args, train_dataset=train_ds, data_collator=collator)
+    trainer = Trainer(
+        model=model, args=args, train_dataset=train_ds, eval_dataset=val_ds,
+        data_collator=collator,
+    )
     trainer.train()
 
     model.save_pretrained(out_dir)
