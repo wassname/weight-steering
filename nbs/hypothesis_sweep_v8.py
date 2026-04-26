@@ -607,11 +607,11 @@ add("qk_x_chars_clusters", "compound", [intersect_basis(qk_circuit[layer], chars
 add("WNR_union_TaskDiff", "compound", [orthonormal_union(write_not_downstream_read[layer], pca(hs_diff_A_fit[layer], PCS)) for layer in range(n_layers)], "rank-expanded union of write_not_downstream_read and TaskDiff_contrast")
 
 ceiling = Candidate(
-    "TaskDiff_lora_ceiling",
-    "ceiling",
+    "TaskDiff_lora_fit",
+    "act:cluster",
     [pca(hs_diff_B_fit[layer], PCS) for layer in range(n_layers)],
     "B-side",
-    "PCA of LoRA FIT-half label; not an A-side hypothesis",
+    "PCA of LoRA FIT-half label (held-out from scoring eval); informative candidate, NOT an oracle. v7 mislabeled this as 'ceiling'.",
 )
 
 logger.info(f"built {len(candidate_list)} A-side candidates + ceiling")
@@ -916,19 +916,40 @@ def axis_kind_for(family: str) -> str:
     return "mixed"
 
 
-# Build the true weight ceiling: top-PCS left singular vectors of the LoRA
-# delta itself, per layer. This is the natural R_w oracle: scoring it gives
-# R_w / R_w_ceiling ~ 1.0 for any properly-implemented per-tensor split.
+# Two oracles, one per axis:
+# - w_oracle: top-PCS left singular vectors of the LoRA delta. Defines
+#   pct_oracle_w_combined ~ 1.0 by construction. Off-axis (act) score is
+#   whatever it happens to be, no reason for it to be high.
+# - act_oracle: top-PCS PCA of L2-normalized hs_diff_B (eval set). Defines
+#   pct_oracle_act ~ 1.0 by construction. This is the optimal basis for the
+#   per-example normalized energy formula in concentration_act. NOTE: in-sample
+#   (computed from the same eval set we score on) so it is the achievable
+#   upper bound on these data, not a generalization claim.
+def act_oracle_basis(layer: int) -> torch.Tensor:
+    X = hs_diff_B[layer].float().cpu()
+    norms = X.norm(dim=1, keepdim=True).clamp(min=1e-12)
+    Xn = X / norms
+    _U, _s, Vh = torch.linalg.svd(Xn, full_matrices=False)
+    return Vh[: PCS].T.contiguous()
+
+
 weight_ceiling = Candidate(
-    "dW_left_basis_ceiling",
+    "w_oracle",
     "ceiling",
     [dw_left_basis(layer) for layer in range(n_layers)],
     "B-side",
-    "Top-PCS left singular vectors of the LoRA residual-output delta itself; defines R_w = 1.0 by construction",
+    "Top-PCS left singular vectors of the LoRA residual-output delta. Defines pct_oracle_w_combined = 1.0 by construction. (was 'dW_left_basis_ceiling' in v8.0.)",
+)
+act_ceiling = Candidate(
+    "act_oracle",
+    "ceiling",
+    [act_oracle_basis(layer) for layer in range(n_layers)],
+    "B-side",
+    "Top-PCS right singular vectors of L2-normalized hs_diff_B (eval). Defines pct_oracle_act = 1.0 by construction (in-sample upper bound).",
 )
 
 
-all_candidates = [*candidate_list, ceiling, weight_ceiling]
+all_candidates = [*candidate_list, ceiling, weight_ceiling, act_ceiling]
 dw_bases = [dw_left_basis(layer) for layer in range(n_layers)]
 rows = []
 for layer in range(n_layers):
@@ -989,21 +1010,19 @@ summary = (
 summary_path = OUT_DIR / "v8_summary.tsv"
 summary.write_csv(summary_path, separator="\t")
 
-# Sanity: oracle row should report pct_oracle ~ 1.0 by construction (it IS
-# the top-r_eff oracle for the weight axis). The act-side oracle is
-# TaskDiff_lora_ceiling, which is similarly ~1.0 by construction.
+# Sanity: each oracle should report pct_oracle ~ 1.0 on its own axis by
+# construction. They are NOT expected to score high on the off-axis.
 weight_ceiling_pct = float(
-    summary.filter(pl.col("subspace") == "dW_left_basis_ceiling")["mean_pct_oracle_w_combined"][0]
+    summary.filter(pl.col("subspace") == "w_oracle")["mean_pct_oracle_w_combined"][0]
 )
 act_ceiling_pct = float(
-    summary.filter(pl.col("subspace") == "TaskDiff_lora_ceiling")["mean_pct_oracle_act"][0]
+    summary.filter(pl.col("subspace") == "act_oracle")["mean_pct_oracle_act"][0]
 )
 logger.info(
-    f"oracle sanity: dW_left_basis_ceiling pct_oracle_w_combined={weight_ceiling_pct:.4f} "
-    f"(SHOULD ~ 1.0 since basis IS top-r_eff left SVD of dW). "
-    f"TaskDiff_lora_ceiling pct_oracle_act={act_ceiling_pct:.4f} "
-    f"(SHOULD ~ 1.0 IF TaskDiff_lora is built as the activation-side oracle; "
-    "lower means TaskDiff_lora is not exactly PCA(hs_diff_B) -- look at construction)."
+    f"oracle sanity: w_oracle pct_oracle_w_combined={weight_ceiling_pct:.4f} "
+    f"(SHOULD ~ 1.0; basis IS top-r_eff left SVD of dW). "
+    f"act_oracle pct_oracle_act={act_ceiling_pct:.4f} "
+    f"(SHOULD ~ 1.0; basis IS top-r_eff right SVD of L2-normalized hs_diff_B)."
 )
 
 # Convenience: percent-scale view (multiply pct_oracle columns by 100).
@@ -1114,35 +1133,95 @@ print(tabulate(specific_summary.head(16).to_pandas(), headers="keys", tablefmt="
 # %%
 plt.rcParams.update({"figure.dpi": 160, "savefig.dpi": 240, "font.size": 9})
 plot_df_all = summary_pct.filter(pl.col("kind") == "A-hypothesis").to_pandas()
-# Two-panel scatter: write/mixed (joint pct_oracle) and read-side
-fig, axes = plt.subplots(1, 2, figsize=(13, 6.2), sharey=True)
+ceiling_df = summary_pct.filter(pl.col("kind") == "ceiling").to_pandas()
+
+# Figure 1: zoomed scatter on percent scale (0-100% to ideal).
+# Most candidates cluster in the 0-15% corner so a zoomed view + percent axis
+# reads more naturally than the full [0,1] square.
+fig, axes = plt.subplots(1, 3, figsize=(16, 5.5))
 for ax, kind_filter, panel_title in [
-    (axes[0], ("write", "mixed"), "write+mixed (pct_oracle = explains delta)"),
-    (axes[1], ("read",), "read-side (pct_oracle_w = cross-space alignment)"),
+    (axes[0], ("write", "mixed"), "write+mixed candidates (% to ideal)"),
+    (axes[1], ("read",), "read-side (cross-space alignment)"),
 ]:
-    panel_df = plot_df_all[plot_df_all["axis_kind"].isin(kind_filter)].head(20)
+    panel_df = plot_df_all[plot_df_all["axis_kind"].isin(kind_filter)].head(20).copy()
+    panel_df["x_pct"] = 100 * panel_df["mean_pct_oracle_act"]
+    panel_df["y_pct"] = 100 * panel_df["mean_pct_oracle_w_combined"]
     for family, fam_df in panel_df.groupby("family"):
-        ax.scatter(fam_df["mean_pct_oracle_act"], fam_df["mean_pct_oracle_w_combined"], s=52, alpha=0.82, label=family)
-    for row in panel_df.head(10).itertuples(index=False):
-        ax.annotate(row.subspace, (row.mean_pct_oracle_act, row.mean_pct_oracle_w_combined), fontsize=7, xytext=(3, 3), textcoords="offset points")
-    ax.set_xlim(0, 1.05)
-    ax.set_ylim(0, 1.05)
-    ax.set_xlabel("pct_oracle_act (1.0 = optimal rank-r_eff PCA)")
+        ax.scatter(fam_df["x_pct"], fam_df["y_pct"], s=58, alpha=0.85, label=family)
+    # Annotate only the top-6 by joint score to avoid label spaghetti.
+    for row in panel_df.head(6).itertuples(index=False):
+        ax.annotate(row.subspace, (row.x_pct, row.y_pct), fontsize=7.5, xytext=(4, 4), textcoords="offset points")
+    ax.set_xlim(0, 18)
+    ax.set_ylim(0, 18)
+    ax.set_xlabel("% to ideal on activation axis")
     ax.set_title(panel_title)
     ax.grid(alpha=0.25)
-    ax.legend(fontsize=7, ncols=2)
-axes[0].set_ylabel("pct_oracle_w_combined (1.0 = top-r_eff SVD of dW)")
-ceiling_df = summary_pct.filter(pl.col("kind") == "ceiling").to_pandas()
-for ax in axes:
-    if len(ceiling_df):
-        ax.scatter(ceiling_df["mean_pct_oracle_act"], ceiling_df["mean_pct_oracle_w_combined"], s=85, marker="*", color="black", label="oracle")
-fig.suptitle("v8: rank-honest pct_oracle in [0, 1]; oracle = top-r_eff subspace at each candidate's effective rank")
+    ax.legend(fontsize=7, ncols=2, loc="upper right")
+axes[0].set_ylabel("% to ideal on weight axis (Frob-balanced combined)")
+axes[1].set_ylabel("")
+
+# Third panel: full-scale view with oracle so the ceiling gap is visible.
+ax = axes[2]
+all_pts = plot_df_all.copy()
+all_pts["x_pct"] = 100 * all_pts["mean_pct_oracle_act"]
+all_pts["y_pct"] = 100 * all_pts["mean_pct_oracle_w_combined"]
+ax.scatter(all_pts["x_pct"], all_pts["y_pct"], s=24, color="steelblue", alpha=0.7, label="A-hypotheses")
+if len(ceiling_df):
+    cd = ceiling_df.copy()
+    cd["x_pct"] = 100 * cd["mean_pct_oracle_act"]
+    cd["y_pct"] = 100 * cd["mean_pct_oracle_w_combined"]
+    ax.scatter(cd["x_pct"], cd["y_pct"], s=140, marker="*", color="black", label="oracle")
+    for row in cd.itertuples(index=False):
+        ax.annotate(row.subspace, (row.x_pct, row.y_pct), fontsize=7.5, xytext=(5, -2), textcoords="offset points")
+ax.set_xlim(0, 100)
+ax.set_ylim(0, 100)
+ax.set_xlabel("% to ideal on activation axis")
+ax.set_ylabel("% to ideal on weight axis")
+ax.set_title("full scale view (gap to oracle)")
+ax.grid(alpha=0.25)
+ax.legend(fontsize=7, loc="upper right")
+
+fig.suptitle("v8: % to ideal = energy_frac(basis) / energy_frac(top-r_eff oracle), per axis. 100% = matches optimal rank-r_eff subspace.")
 fig.tight_layout()
 scatter_png = OUT_DIR / "v8_joint_act_weight_scatter.png"
 scatter_pdf = OUT_DIR / "v8_joint_act_weight_scatter.pdf"
 fig.savefig(scatter_png, bbox_inches="tight")
 fig.savefig(scatter_pdf, bbox_inches="tight")
 plt.close(fig)
+
+# Figure 2: horizontal bar chart of joint % to ideal (write/mixed only).
+# Easier to read than the scatter when everything compresses into a corner.
+bar_df = (
+    summary_pct.filter(pl.col("axis_kind").is_in(["write", "mixed", "ceiling"]))
+    .sort("joint_pct_oracle", descending=True)
+    .head(20)
+    .to_pandas()
+)
+fig2, ax2 = plt.subplots(figsize=(9, 7))
+y_pos = np.arange(len(bar_df))
+ax2.barh(
+    y_pos, 100 * bar_df["mean_pct_oracle_act"], height=0.42, label="% to ideal: activation",
+    color="#5B8FF9", edgecolor="black", linewidth=0.4,
+)
+ax2.barh(
+    y_pos - 0.42, 100 * bar_df["mean_pct_oracle_w_combined"], height=0.42, label="% to ideal: weight (combined)",
+    color="#F6BD16", edgecolor="black", linewidth=0.4,
+)
+ax2.set_yticks(y_pos - 0.21)
+ax2.set_yticklabels(bar_df["subspace"], fontsize=8)
+ax2.invert_yaxis()
+ax2.axvline(100, color="black", linestyle="--", linewidth=0.8, label="ideal (100%)")
+ax2.set_xlim(0, 105)
+ax2.set_xlabel("% to ideal at candidate's effective rank")
+ax2.set_title("v8 joint % to ideal (top-20 write+mixed candidates + oracle)")
+ax2.legend(loc="lower right", fontsize=8)
+ax2.grid(axis="x", alpha=0.25)
+fig2.tight_layout()
+bar_png = OUT_DIR / "v8_pct_ideal_bars.png"
+bar_pdf = OUT_DIR / "v8_pct_ideal_bars.pdf"
+fig2.savefig(bar_png, bbox_inches="tight")
+fig2.savefig(bar_pdf, bbox_inches="tight")
+plt.close(fig2)
 
 definitions_path = OUT_DIR / "v8_definitions.md"
 plan_merge_path = OUT_DIR / "v8_plan_merge.md"
@@ -1202,8 +1281,8 @@ Per-tensor pct_oracle for the winner: oproj={winner['mean_pct_oracle_w_oproj']:.
 Top-5 overlap (by pct_oracle_act and pct_oracle_w_combined, write/mixed only): {both_top5}.
 
 Sanity check (oracle rows):
-- `dW_left_basis_ceiling`.pct_oracle_w_combined = {weight_ceiling_pct:.3f} (SHOULD ~ 1.0)
-- `TaskDiff_lora_ceiling`.pct_oracle_act = {act_ceiling_pct:.3f} (SHOULD ~ 1.0 if TaskDiff_lora is built as the activation oracle; lower means the construction differs from PCA(hs_diff_B normalized))
+- `w_oracle`.pct_oracle_w_combined = {weight_ceiling_pct:.3f} (SHOULD ~ 1.0)
+- `act_oracle`.pct_oracle_act = {act_ceiling_pct:.3f} (SHOULD ~ 1.0)
 
 ## Reading pct_oracle
 
@@ -1255,7 +1334,8 @@ optimal.
 - Summary (percent-scale view): `{summary_pct_path}`
 - Residualized activation per-layer scores: `{specific_per_layer_path}`
 - Residualized activation summary: `{specific_summary_path}`
-- Joint scatter (write+mixed | read sub-panel): `{scatter_png}`, `{scatter_pdf}`
+- Joint scatter (zoomed % view + full-scale gap to oracle): `{scatter_png}`, `{scatter_pdf}`
+- Bar chart of joint % to ideal: `{bar_png}`, `{bar_pdf}`
 - Definitions: `{definitions_path}`
 - v8-vs-v7 changes: `{plan_merge_path}`
 """)
