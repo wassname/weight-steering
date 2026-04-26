@@ -95,11 +95,16 @@ dilemmas. PiSSA is still the best "clean" adapter if you penalize DeLoRA's
 ### Subspace/projection lesson
 
 The original question was: can we find the subspace or parameterization that
-explains the difference between the positive and negative LoRAs? So far:
+explains the difference between the positive and negative LoRAs? So far we
+tested three kinds of explanations:
 
-- Canonical low-rank bases from pretrained weights, persona contrasts, and
-    activation PCA all have low overlap with the LoRA weight oracle: about
-    1-8% across adapter families and LoRA layers.
+- **Parameterization:** LoRA / DoRA / PiSSA / DeLoRA / OFT / IA3. Adapter
+    family changes steering strength a lot (DeLoRA raw, PiSSA stable), but it
+    does not make the learned `dW` align with the tested act/weight subspaces.
+- **Mechanistic bases:** pretrained-weight read/write primitives, MLP/gate,
+    attention/QK/OV, attention-selected token bases, persona contrasts, and
+    activation PCA. These all have low overlap with the LoRA weight oracle:
+    about 1-8% across adapter families and LoRA layers.
 - Block-local activation PCA did not rescue this. The issue is not just that
     cumulative activations mix upstream layers.
 - A functional projection test says the PCA activation directions can be
@@ -127,10 +132,11 @@ is the cleanest evidence that `act_oracle` is an intervention target, not an
 explanation of what the trained adapter learned.
 
 Current best interpretation: "planning subspace" should be defined causally
-(what intervention changes behavior), not geometrically (what PCA basis
-overlaps `dW`). The LoRA appears to write concept-space directions that
-downstream layers translate into Yes/No or honesty behavior; a low-rank
-readable basis does not capture the full mechanism.
+(what intervention changes behavior), not by a simple tested parameterization
+or geometric basis (adapter family, attention basis, read/write basis, or PCA
+overlap with `dW`). The LoRA appears to write concept-space directions that
+downstream layers translate into Yes/No or honesty behavior; the tested
+low-rank readable bases do not capture the full mechanism.
 >
 > Original README from upstream below.
 

@@ -363,10 +363,12 @@ Clarification on the object of search: we were looking for a subspace or
 parameterization that *explains the difference between the positive and
 negative LoRAs*, i.e. a basis in which `dW = θ_pos - θ_neg` becomes simple or
 functionally concentrated. v9/v10 speak directly to that for residual-output
-weights. The answer so far is: not the canonical pretrained-weight bases, not
-the persona-contrast bases, and not the top activation-PCA directions at the
-trained scale. That does not mean no compact causal description exists. It
-means our tested geometric descriptions are not it.
+weights. The answer so far is: not adapter family alone (LoRA/DoRA/PiSSA/
+DeLoRA/OFT/IA3), not the canonical pretrained-weight bases, not the attention
+or MLP read/write primitives, not the attention-selected token bases, not the
+persona-contrast bases, and not the top activation-PCA directions at trained
+scale. That does not mean no compact causal description exists. It means our
+tested parameterizations and geometric descriptions are not it.
 
 `complement` means the part of the residual-output weight diff left after
 removing the activation-PCA subspace:
