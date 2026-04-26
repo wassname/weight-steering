@@ -170,8 +170,12 @@ monotonicity and perfect pmass but the "honest engineer" persona backfires at 1.
 
 ### tl;dr
 
-- DeLoRA is the strongest behavioral steerer by a large margin (delta = +0.94
-  logratio at coeff=+1 vs base, ~1.5x DoRA/PiSSA, ~2x LoRA/OFT, ~3.5x IA3).
+- DeLoRA is the strongest daily-dilemmas steerer by a large margin (base-only
+  delta = +0.70 logratio at coeff=+1 vs base, ~1.7x DoRA/PiSSA,
+  ~2.7x LoRA/OFT, ~23x IA3). NOTE: an earlier table used +0.94 because
+  `dilemmas_summary.csv` mixed base@0 with the AxBench `honest_engineer`
+  persona baseline at coeff=0. `cross_adapter_v9.py` now uses base-only
+  `dilemmas_per_row.csv`.
 - Every linear "find the planning subspace" method we tried lands at ~1-8%
   subspace overlap with the weight oracle. Across 6 adapter families, on every
   LoRA layer (8-21). Both cumulative and block-local act oracles. So either
@@ -180,16 +184,16 @@ monotonicity and perfect pmass but the "honest engineer" persona backfires at 1.
 
 ### Headline numbers (cross_adapter_v9)
 
-Behavioral steering on daily-dilemmas honesty subset (logratio_honesty, n=100):
+Behavioral steering on daily-dilemmas honesty subset (base persona only; 100 dilemmas / 200 action rows per nonzero coeff):
 
 | adapter | logratio @ -1 | @ 0 (base) | @ +1 | delta(+1 - 0) |
 |---------|---------------|------------|------|---------------|
-| delora  | -0.29         | 1.08       | 2.02 | **+0.94**     |
-| dora    |  0.73         | 1.08       | 1.72 | +0.64         |
-| pissa   |  0.44         | 1.08       | 1.69 | +0.60         |
-| oft     |  1.09         | 1.08       | 1.57 | +0.49         |
-| lora    |  1.09         | 1.08       | 1.55 | +0.47         |
-| ia3     |  1.29         | 1.08       | 1.35 | +0.26         |
+| delora  | -0.29         | 1.32       | 2.02 | **+0.70**     |
+| dora    |  0.73         | 1.32       | 1.72 | +0.41         |
+| pissa   |  0.44         | 1.32       | 1.69 | +0.37         |
+| oft     |  1.09         | 1.32       | 1.57 | +0.26         |
+| lora    |  1.09         | 1.32       | 1.55 | +0.23         |
+| ia3     |  1.29         | 1.32       | 1.35 | +0.03         |
 
 DeLoRA is the only adapter that meaningfully *de*-steers (negative coeff →
 dishonest). LoRA/OFT/IA3 are nearly flat at coeff=-1.

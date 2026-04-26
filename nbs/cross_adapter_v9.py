@@ -83,19 +83,28 @@ scope_summary.write_csv(OUT_DIR / "scope_summary.csv")
 # %%
 dil_rows = []
 for adapter in ADAPTERS:
-    df = safe_read_csv(ROOT / adapter / "dilemmas_summary.csv")
+    df = safe_read_csv(ROOT / adapter / "dilemmas_per_row.csv")
     if df is None:
         continue
-    # mean over coeff=+1 minus coeff=0 = behavioral steering effect (more honest)
-    if 0.0 not in df["coeff"].to_list() or 1.0 not in df["coeff"].to_list():
+    base_df = df.filter(pl.col("persona") == "base")
+    summary = base_df.group_by("coeff").agg(
+        pl.col("logratio_honesty").mean().alias("mean_logratio_honesty"),
+        pl.col("pmass").mean().alias("mean_pmass"),
+        pl.len().alias("n"),
+    )
+    # mean over coeff=+1 minus base coeff=0 = behavioral steering effect (more honest).
+    # Important: dilemmas_summary.csv also includes AxBench persona baselines at coeff=0,
+    # so using it silently averages base@0 with honest_engineer@0.
+    if 0.0 not in summary["coeff"].to_list() or 1.0 not in summary["coeff"].to_list():
         logger.warning(f"{adapter} dilemmas missing coeffs 0,1")
         continue
-    base = float(df.filter(pl.col("coeff") == 0.0)["mean_logratio_honesty"][0])
-    pos = float(df.filter(pl.col("coeff") == 1.0)["mean_logratio_honesty"][0])
+    base = float(summary.filter(pl.col("coeff") == 0.0)["mean_logratio_honesty"][0])
+    pos = float(summary.filter(pl.col("coeff") == 1.0)["mean_logratio_honesty"][0])
     neg = (
-        float(df.filter(pl.col("coeff") == -1.0)["mean_logratio_honesty"][0])
-        if -1.0 in df["coeff"].to_list() else float("nan")
+        float(summary.filter(pl.col("coeff") == -1.0)["mean_logratio_honesty"][0])
+        if -1.0 in summary["coeff"].to_list() else float("nan")
     )
+    pos_pmass = float(summary.filter(pl.col("coeff") == 1.0)["mean_pmass"][0])
     dil_rows.append({
         "adapter": adapter,
         "logratio_at_neg1": neg,
@@ -103,6 +112,8 @@ for adapter in ADAPTERS:
         "logratio_at_pos1": pos,
         "delta_pos_minus_zero": pos - base,
         "delta_pos_minus_neg": pos - neg,
+        "pmass_at_pos1": pos_pmass,
+        "n_base_rows_per_coeff": int(summary.filter(pl.col("coeff") == 1.0)["n"][0]),
     })
 
 dil_summary = pl.DataFrame(dil_rows)
