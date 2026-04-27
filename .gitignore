@@ -10,3 +10,8 @@ wandb/
 logs/
 spec/
 *.ipynb
+
+# add manually if at all
+docs/
+.pi/
+.codex/

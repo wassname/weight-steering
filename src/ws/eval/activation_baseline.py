@@ -92,12 +92,24 @@ def _capture_last_token_blocks(model, tok, prompts: list[str], *, system: str) -
 
 
 def _fit_repe_directions(model, tok, n_train_topics: int) -> Tensor:
+    """PCA(n=1) of (hs_pos - hs_neg) per layer, via torch SVD on centered diffs.
+    PCA == SVD on mean-centered data; the first right singular vector (Vh[0])
+    is the unit-norm principal direction. Matches vgel/repeng `pca_diff`.
+    Sign-correct so the positive class projects larger along the returned direction.
+    """
     prompts = [f"I think {claim}. {question}" for claim, question in train_topics()[:n_train_topics]]
-    hs_pos = _capture_last_token_blocks(model, tok, prompts, system=SYCOPHANCY_POS_PERSONAS[0])
-    hs_neg = _capture_last_token_blocks(model, tok, prompts, system=SYCOPHANCY_NEG_PERSONAS[0])
-    directions = (hs_pos - hs_neg).mean(1)
-    directions = directions / directions.norm(dim=-1, keepdim=True)
-    logger.info(f"fit RepE directions: shape={tuple(directions.shape)} from {len(prompts)} prompts")
+    hs_pos = _capture_last_token_blocks(model, tok, prompts, system=SYCOPHANCY_POS_PERSONAS[0]).float()
+    hs_neg = _capture_last_token_blocks(model, tok, prompts, system=SYCOPHANCY_NEG_PERSONAS[0]).float()
+    n_layers, n_prompts, d = hs_pos.shape
+    diffs = hs_pos - hs_neg
+    diffs_centered = diffs - diffs.mean(dim=1, keepdim=True)
+    _u, _s, vh = torch.linalg.svd(diffs_centered, full_matrices=False)
+    directions = vh[:, 0, :]
+    proj_pos = torch.einsum("lpd,ld->lp", hs_pos, directions).mean(dim=1)
+    proj_neg = torch.einsum("lpd,ld->lp", hs_neg, directions).mean(dim=1)
+    flip = (proj_pos < proj_neg).float() * -2 + 1
+    directions = directions * flip.unsqueeze(-1)
+    logger.info(f"fit RepE PCA directions: shape={tuple(directions.shape)} from {n_prompts} prompts")
     return directions
 
 
@@ -108,6 +120,23 @@ def _edit_last_token(direction: Tensor, coeff: float, seq_idx: Tensor):
         b, _s, d = x.shape
         delta = direction.to(device=x.device, dtype=x.dtype).view(1, d)
         x[torch.arange(b, device=x.device), seq_idx] += coeff * delta
+        return _replace_block_output(output, x)
+
+    return edit
+
+
+def _edit_all_tokens_per_layer(directions: Tensor, layer_indices: list[int], coeff: float):
+    """Canonical RepE: at each hooked layer L, add coeff * directions[L] at every token.
+    Matches how vgel/repeng applies a ControlVector across the residual stream."""
+    layer_to_dir = {f"model.layers.{L}": directions[L] for L in layer_indices}
+
+    def edit(output, layer_name):
+        direction = layer_to_dir[layer_name]
+        x0 = _block_output(output)
+        x = x0.clone()
+        d = x.shape[-1]
+        delta = direction.to(device=x.device, dtype=x.dtype).view(1, 1, d)
+        x = x + coeff * delta
         return _replace_block_output(output, x)
 
     return edit
@@ -131,24 +160,24 @@ def _sycophancy_eval_repe(model, tok, directions: Tensor, cfg: ActivationBaselin
     tok.padding_side = old_padding_side
     seq_idx = torch.full((enc.input_ids.shape[0],), enc.input_ids.shape[1] - 1, device=model.device)
 
+    hooks = [f"model.layers.{L}" for L in cfg.layers]
+    layer_list = list(cfg.layers)
     rows = []
-    for layer in cfg.layers:
-        hook = f"model.layers.{layer}"
-        for coeff in cfg.coeffs:
-            with TraceDict(model, [hook], edit_output=_edit_last_token(directions[layer], coeff, seq_idx)):
-                out = model(**enc)
-            logp_choices = _choice_logp(out.logits[:, -1], choice_ids)
-            logratio = logp_choices[:, 1] - logp_choices[:, 0]
-            pmass = logp_choices.exp().sum(-1)
-            for claim_idx in range(len(topics)):
-                rows.append({
-                    "method": "repeng",
-                    "layer": layer,
-                    "coeff": float(coeff),
-                    "claim_idx": claim_idx,
-                    "logratio": float(logratio[claim_idx].item()),
-                    "pmass": float(pmass[claim_idx].item()),
-                })
+    for coeff in cfg.coeffs:
+        with TraceDict(model, hooks, edit_output=_edit_all_tokens_per_layer(directions, layer_list, coeff)):
+            out = model(**enc)
+        logp_choices = _choice_logp(out.logits[:, -1], choice_ids)
+        logratio = logp_choices[:, 1] - logp_choices[:, 0]
+        pmass = logp_choices.exp().sum(-1)
+        for claim_idx in range(len(topics)):
+            rows.append({
+                "method": "repeng",
+                "layer": -1,
+                "coeff": float(coeff),
+                "claim_idx": claim_idx,
+                "logratio": float(logratio[claim_idx].item()),
+                "pmass": float(pmass[claim_idx].item()),
+            })
     return pl.DataFrame(rows)
 
 
@@ -209,32 +238,31 @@ def _dilemmas_eval_repe(model, tok, directions: Tensor, cfg: ActivationBaselineC
     tok.padding_side = old_padding_side
     choice_ids = get_choice_ids(tok)
 
+    hooks = [f"model.layers.{L}" for L in cfg.layers]
+    layer_list = list(cfg.layers)
     rows = []
-    for layer in cfg.layers:
-        hook = f"model.layers.{layer}"
-        for coeff in cfg.coeffs:
-            for batch in dl:
-                batch_gpu = {k: v.to(model.device) for k, v in batch.items() if k in ("input_ids", "attention_mask")}
-                seq_idx = torch.full((batch_gpu["input_ids"].shape[0],), batch_gpu["input_ids"].shape[1] - 1, device=model.device)
-                with TraceDict(model, [hook], edit_output=_edit_last_token(directions[layer], coeff, seq_idx)):
-                    out = model(**batch_gpu)
-                logp_choices = _choice_logp(out.logits[:, -1], choice_ids)
-                logratio = logp_choices[:, 1] - logp_choices[:, 0]
-                pmass = logp_choices.exp().sum(-1)
-                maxp = out.logits[:, -1].float().softmax(-1).max(-1).values
-                low_pmass = pmass < dcfg.pmass_threshold * maxp
-                for i in range(len(logratio)):
-                    rows.append({
-                        "method": "repeng",
-                        "layer": layer,
-                        "coeff": float(coeff),
-                        "idx": int(batch["idx"][i].item()),
-                        "dilemma_idx": int(batch["dilemma_idx"][i].item()),
-                        "logratio": float(logratio[i].item()),
-                        "pmass": float(pmass[i].item()),
-                        "low_pmass": bool(low_pmass[i].item()),
-                    })
-            logger.info(f"repeng layer={layer} coeff={coeff:+.1f}: {len(ds_pt)} DD rows")
+    for coeff in cfg.coeffs:
+        for batch in dl:
+            batch_gpu = {k: v.to(model.device) for k, v in batch.items() if k in ("input_ids", "attention_mask")}
+            with TraceDict(model, hooks, edit_output=_edit_all_tokens_per_layer(directions, layer_list, coeff)):
+                out = model(**batch_gpu)
+            logp_choices = _choice_logp(out.logits[:, -1], choice_ids)
+            logratio = logp_choices[:, 1] - logp_choices[:, 0]
+            pmass = logp_choices.exp().sum(-1)
+            maxp = out.logits[:, -1].float().softmax(-1).max(-1).values
+            low_pmass = pmass < dcfg.pmass_threshold * maxp
+            for i in range(len(logratio)):
+                rows.append({
+                    "method": "repeng",
+                    "layer": -1,
+                    "coeff": float(coeff),
+                    "idx": int(batch["idx"][i].item()),
+                    "dilemma_idx": int(batch["dilemma_idx"][i].item()),
+                    "logratio": float(logratio[i].item()),
+                    "pmass": float(pmass[i].item()),
+                    "low_pmass": bool(low_pmass[i].item()),
+                })
+        logger.info(f"repeng all-layers coeff={coeff:+.1f}: {len(ds_pt)} DD rows")
 
     meta = pl.DataFrame([
         {
