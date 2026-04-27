@@ -19,7 +19,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ws._log import final_summary, get_argv, setup_logging
 from ws.diff import DIFF_FILENAME, load_diff
-from ws.eval.dilemmas import DilemmasCfg, evaluate
+from ws.eval.dilemmas import DilemmasCfg, compute_full_metrics, evaluate
 
 
 @dataclass
@@ -48,9 +48,18 @@ def _summarize(df: pl.DataFrame) -> pl.DataFrame:
     zero = summary.filter(pl.col("coeff") == 0.0).select(
         "adapter", pl.col("mean_logratio_honesty").alias("mean_logratio_honesty_0")
     )
-    return summary.join(zero, on="adapter", how="left").with_columns(
+    summary = summary.join(zero, on="adapter", how="left").with_columns(
         (pl.col("mean_logratio_honesty") - pl.col("mean_logratio_honesty_0")).alias("delta_vs_0"),
     ).sort(["adapter", "coeff"])
+
+    # SI per adapter (bidirectional; uses coeff=-1/0/+1)
+    si_rows = []
+    for adapter in df["adapter"].unique().to_list():
+        adf = df.filter(pl.col("adapter") == adapter)
+        m = compute_full_metrics(adf)
+        si_rows.append({"adapter": adapter, "SI": m["surgical_informedness"], "si_fwd": m["si_fwd"], "si_rev": m.get("si_rev", float("nan"))})
+    si_df = pl.DataFrame(si_rows)
+    return summary.join(si_df, on="adapter", how="left")
 
 
 def main(cfg: FullDDBenchmarkCfg) -> None:
@@ -91,21 +100,22 @@ def main(cfg: FullDDBenchmarkCfg) -> None:
     )
     expected_rows = cfg.expected_base_rows_per_coeff
     bad_counts = row_counts.filter((pl.col("min_rows") != expected_rows) | (pl.col("max_rows") != expected_rows)).height
-    best = summary.filter(pl.col("coeff") == 1.0).sort("delta_vs_0", descending=True)
+    best = summary.filter(pl.col("coeff") == 1.0).sort("SI", descending=True, nulls_last=True)
     print("\nfull daily-dilemmas benchmark")
     print(
         f"SHOULD: every adapter has n_base_rows_per_coeff={expected_rows} for every coeff. "
         "ELSE requested split size was not used."
     )
+    print("SI = surgical_informedness (ref-anchored, bidirectional, k_fpr=2). Higher=better.")
     print(tabulate(best.to_pandas(), headers="keys", tablefmt="tsv", floatfmt="+.3f", showindex=False))
     cue = "🟢" if bad_counts == 0 else "🔴"
     final_summary(
         out=summary_path,
         argv=get_argv(),
-        main_metric=f"bad_row_count_adapters={bad_counts}; best_alpha1={best['adapter'][0]} {float(best['delta_vs_0'][0]):+.3f}",
+        main_metric=f"bad_row_count_adapters={bad_counts}; best_SI={best['adapter'][0]} SI={float(best['SI'][0]):+.3f}",
         cue=cue,
-        table_rows=best.select("adapter", "coeff", "delta_vs_0", "mean_pmass", "frac_low_pmass", "n_base_rows_per_coeff").rows(),
-        headers=["adapter", "coeff", "delta_vs_0", "mean_pmass", "frac_low_pmass", "n_rows"],
+        table_rows=best.select("adapter", "SI", "si_fwd", "si_rev", "delta_vs_0", "mean_pmass", "n_base_rows_per_coeff").rows(),
+        headers=["adapter", "SI", "si_fwd", "si_rev", "delta_vs_0", "pmass", "n_rows"],
         floatfmt="",
     )
 
