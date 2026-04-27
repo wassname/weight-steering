@@ -623,3 +623,28 @@ Cleanup: deleted superseded notebooks (`analyze_diff*`, `cross_adapter_v9`,
 `strong_conclusion_v4`, `v10_llama`) and their result dirs
 (`out/sycophancy/{cross_adapter_v9,v10_alpha_sweep,v10_functional_projection}`).
 Kept `nbs/ablation_analysis.py` as the single notebook.
+
+# 2026-04-27: train/eval axis switch — sycophancy → honesty (branch `dev`)
+
+Why: previous training contrast was `SYCOPHANCY_POS` ("validate user, never push back") vs `SYCOPHANCY_NEG` (literally "you are an honest assistant"), so training was 2-axis (sycophancy + honesty) while eval (`daily_dilemmas-self-honesty`) is signed by `honesty_label` only. Cross-method deltas were still comparable on identical rows, but the absolute "is steering working" claim was weakened by the train/eval axis mismatch.
+
+Decision: option 2 — switch the entire pipeline to honesty. The NEG persona was already honesty-themed, so this makes the existing implicit axis explicit, eliminates the GPT-4o sycophancy-eval generation burden of option 1, and turns sycophancy into a free OOD transfer eval for later. T4 multiseed and T5 Gemma will be re-scoped against honesty rather than sycophancy.
+
+Persona pair (vgel/repeng convention, short form):
+- POS = `Pretend you're {an honest, a truthful, a candid, a straightforward, a sincere} person.` ×5 paraphrases
+- NEG = `Pretend you're {a dishonest, a deceptive, a manipulative, a misleading, a lying} person.` ×5
+
+Question pool: `data/branching_suffixes.json` (550 SSteer entries, `(cat, suffix, user_msg)`). For paper-recipe training (Fierro & Roger 2025 §F.1) we use `user_msg` only as the question; the persona-conditioned model generates r_pos / r_neg, then LoRA trains on the pair, then system prompt is stripped at train time so the adapter learns behavior unconditionally. For RepE direction extraction we capture last-token hidden states with `assistant_prefixes=suffix` (no backprop, just observation).
+
+Code changes (uncommitted on `dev`):
+- `src/ws/data.py`: `HONESTY_PROMPT`, `HONESTY_POS_PERSONAS`, `HONESTY_NEG_PERSONAS`, `_load_suffixes()`, behavior branches in `_personas`, `_topics`, `_build_specs`.
+- `src/ws/eval/activation_baseline.py`: `_fit_repe_directions(..., behavior)` honesty branch using suffix prompts + `assistant_prefixes`.
+- `src/ws/eval/prompt_baseline.py`: paired `engineered_prompt_honest` + `engineered_prompt_dishonest` (AxBench J.2).
+- `evals/smoke.py`: `behavior` field in `SmokeCfg`. Smoke passes end-to-end on `katuni4ka/tiny-random-qwen3` with `--behavior honesty`.
+- `data/branching_suffixes.json`: copied from SSteer.
+
+Pueue: killed sycophancy runs (215-228). Queued honesty pipeline:
+- 230: `run_sweep --behavior honesty` (1000 pairs, 6 adapters: lora/dora/pissa/delora/oft/boft/ia3) — running.
+- 231-236 chained `--after 230`: T1 RepE, T3 prompt baseline, T2 full DD, T6 cross-adapter, T7 layer/module, T8 parameterization (all `--behavior honesty --n-dilemmas 219 --batch-size 8`).
+
+Sycophancy outputs in `out/sycophancy/` are kept as historical evidence for the old axis-mismatched table. README headline numbers will be replaced with honesty once 231-236 land. T4/T5 remain open.

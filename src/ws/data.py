@@ -17,6 +17,7 @@ Output columns:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +26,9 @@ from datasets import Dataset
 from loguru import logger
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DATA_DIR = REPO_ROOT / "data"
 
 # 5 positive + 5 negative personas (paper §3, Appendix C / persona-vectors).
 # Paraphrases of the same instruction; diversity helps the adapter learn the
@@ -102,6 +106,56 @@ def eval_topics() -> list[tuple[str, str]]:
     return SYCOPHANCY_TOPICS[N_TRAIN_TOPICS:]
 
 
+# Short contrastive persona pair (vgel/repeng convention).
+# Format: HONESTY_PROMPT.format(persona=HONESTY_POS_PERSONAS[i]) -> system prompt.
+# 5 paraphrases each (paper recipe, persona-vectors §3 / Appendix C). Sycophancy
+# becomes OOD transfer eval once training switches to this pair.
+HONESTY_PROMPT = "Pretend you're {persona} person. "
+HONESTY_POS_PERSONAS = (
+    "an honest",
+    "a truthful",
+    "a candid",
+    "a straightforward",
+    "a sincere",
+)
+HONESTY_NEG_PERSONAS = (
+    "a dishonest",
+    "a deceptive",
+    "a manipulative",
+    "a misleading",
+    "a lying",
+)
+
+
+def _load_suffixes(thinking: bool = True) -> list[dict]:
+    """Load branching-point suffixes from data/branching_suffixes.json.
+
+    Each entry: {cat: str, suffix: str, user_msg: str}.
+    Built by SSteer's scripts/build_branching_suffixes.py from diverse HF datasets,
+    truncated at high-entropy tokens (natural branching points).
+
+    For thinking-mode models, prepend <think> to half the suffixes so the
+    extracted direction matches the inference distribution.
+    """
+    path = DATA_DIR / "branching_suffixes.json"
+    with open(path) as f:
+        entries = json.load(f)
+    # Strip thinking tokens from suffixes -- we add <think> ourselves when needed,
+    # and raw <think>...</think> blocks from reasoning_trace sources break
+    # apply_chat_template(continue_final_message=True).
+    for e in entries:
+        s = e["suffix"].replace("</think>", "").replace("<think>", "")
+        e["suffix"] = s.strip()
+    entries = [e for e in entries if e["suffix"]]
+    assert entries, f"No suffixes found in {path}"
+    if thinking:
+        for i, e in enumerate(entries):
+            if i % 2 == 0:
+                e["suffix"] = f"<think>{e['suffix']}"
+    logger.info(f"Loaded {len(entries)} suffixes from {path}")
+    return entries
+
+
 @dataclass
 class DataCfg:
     model_id: str = "Qwen/Qwen3-0.6B"
@@ -119,24 +173,44 @@ class DataCfg:
 def _personas(behavior: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if behavior == "sycophancy":
         return SYCOPHANCY_POS_PERSONAS, SYCOPHANCY_NEG_PERSONAS
+    if behavior == "honesty":
+        pos = tuple(HONESTY_PROMPT.format(persona=p) for p in HONESTY_POS_PERSONAS)
+        neg = tuple(HONESTY_PROMPT.format(persona=p) for p in HONESTY_NEG_PERSONAS)
+        return pos, neg
     raise ValueError(f"unknown behavior: {behavior}")
 
 
 def _topics(behavior: str) -> list[tuple[str, str]]:
     if behavior == "sycophancy":
         return train_topics()
+    if behavior == "honesty":
+        # Paper recipe (Fierro & Roger 2025 §F.1): persona-conditioned model generates
+        # responses to a diverse question pool, then LoRA trains on (r_pos, r_neg).
+        # Reuse branching_suffixes' user_msg fields as the question pool: 550 diverse
+        # prompts (email/fact/reasoning/code/...) -- richer than 20 sycophancy claims.
+        # Suffix is unused here; it's for RepE direction extraction in activation_baseline.
+        entries = _load_suffixes(thinking=False)
+        return [(e["user_msg"], "") for e in entries]
     raise ValueError(f"unknown behavior: {behavior}")
 
 
-def _build_specs(topics, n_personas: int, n_samples: int):
+def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
     """Cartesian product (topic_idx, persona_idx, sample_idx). Returns list of dicts."""
     specs = []
-    for ti, (claim, q) in enumerate(topics):
+    for ti, (a, b) in enumerate(topics):
+        # sycophancy: (claim, q) -> "I think {claim}. {q}" (user nudges with a wrong belief).
+        # honesty:    (user_msg, "") -> user_msg as-is (diverse open-ended prompts).
+        if behavior == "sycophancy":
+            prompt = f"I think {a}. {b}"
+        elif behavior == "honesty":
+            prompt = a
+        else:
+            raise ValueError(f"unknown behavior: {behavior}")
         for pi in range(n_personas):
             for si in range(n_samples):
                 specs.append({
                     "topic_idx": ti, "persona_idx": pi, "sample_idx": si,
-                    "prompt": f"I think {claim}. {q}",
+                    "prompt": prompt,
                 })
     return specs
 
@@ -172,7 +246,7 @@ def generate_pairs(cfg: DataCfg) -> Path:
         raise ValueError(f"need {cfg.n_topics} topics, have {len(all_topics)}")
     topics = all_topics[:cfg.n_topics]
 
-    specs = _build_specs(topics, cfg.n_personas, cfg.n_samples)
+    specs = _build_specs(topics, cfg.n_personas, cfg.n_samples, cfg.behavior)
     n = len(specs)
     logger.info(f"data grid: {cfg.n_topics} topics × {cfg.n_personas} personas × {cfg.n_samples} samples = {n} pairs")
 

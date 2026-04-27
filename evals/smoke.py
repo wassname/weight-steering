@@ -32,13 +32,14 @@ class SmokeCfg:
     max_steps: int = 2
     out: Path = Path("out/smoke")
     adapter: str = "lora"
+    behavior: str = "sycophancy"
 
 
 def main(cfg: SmokeCfg) -> None:
-    print(f"[smoke] model={cfg.model} adapter={cfg.adapter} max_steps={cfg.max_steps}")
+    print(f"[smoke] model={cfg.model} adapter={cfg.adapter} behavior={cfg.behavior} max_steps={cfg.max_steps}")
     rcfg = Cfg(
         model=cfg.model,
-        behavior="sycophancy",
+        behavior=cfg.behavior,
         adapter=cfg.adapter,
         max_steps=cfg.max_steps,
         out=cfg.out,

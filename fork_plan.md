@@ -219,3 +219,25 @@ follow-ups, not blockers for the current writeup.
 - If top-k or write-not-read keeps behavior, we found a simple steering parameterization.
 - If complement/tail/many layers keep behavior, evidence favors distributed or wrong-space mechanism.
 - If MLP `up/gate` terms carry behavior, next paper story should be feature-space steering, not residual-stream planning subspace.
+- Held-out cross-adapter shared-SVD rule (contingent on T4 multiseed):
+  - If T4 shows within-adapter stdev > cross-adapter retained gap on lens-3, the N=1 cross-adapter inconsistency was seed noise -> held-out shared-SVD becomes worth running.
+  - If T4 confirms cross-adapter gap is real (current expectation), skip held-out shared-SVD -- it will fail by construction and only restates what is already known.
+
+## Resolved: train/eval axis switch from sycophancy to honesty (2026-04-27)
+
+**Decision: option 2** — switched the entire pipeline to honesty axis. Rationale:
+
+- The sycophancy NEG persona was already "you are an honest assistant", so the prior contrast was effectively honesty-vs-anti-honesty with extra sycophancy framing on the POS side. Cleaner to make that explicit.
+- Eval (`daily_dilemmas-self-honesty`) signs by `honesty_label`. One-axis training matches the eval axis by construction. The in-sample claim is now defensible.
+- Sycophancy becomes a free OOD transfer eval (run later if useful) rather than a confounded primary axis.
+- Avoids the GPT-4o sycophancy-eval generation burden (option 1) and its eval-validation overhead.
+
+What changed in code (commit on `dev`):
+
+- `src/ws/data.py`: added `HONESTY_PROMPT = "Pretend you're {persona} person. "` with 5 paraphrase paraphrases each side (`HONESTY_POS_PERSONAS`, `HONESTY_NEG_PERSONAS`) — vgel/repeng short-persona convention. Added `_load_suffixes()` reader for `data/branching_suffixes.json` (550 SSteer entries). Honesty branch reuses the suffix `user_msg` as the question pool; persona-conditioned generation in `generate_pairs()` produces (r_pos, r_neg) per the paper recipe (Fierro & Roger 2025 §F.1).
+- `src/ws/eval/activation_baseline.py`: RepE direction extraction now branches on `cfg.behavior`; honesty mode captures last-token hidden states under `HONESTY_POS[0]` / `HONESTY_NEG[0]` over `_load_suffixes()` prompts with `assistant_prefixes=suffix`.
+- `src/ws/eval/prompt_baseline.py`: replaced single `engineered_prompt` with paired `engineered_prompt_honest` + `engineered_prompt_dishonest` (AxBench Appendix J.2 style).
+- `evals/smoke.py`: added `behavior` field; `just smoke --behavior honesty` passes end-to-end on `katuni4ka/tiny-random-qwen3`.
+- `data/branching_suffixes.json`: copied from SSteer.
+
+Sycophancy outputs in `out/sycophancy/` are kept on disk as historical evidence for the old axis-mismatched table. The README headline numbers will be replaced with honesty once 230-236 land. T4/T5 stay open and will be re-scoped against honesty.

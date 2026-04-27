@@ -21,7 +21,16 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPadding
 
 from ws._log import final_summary, get_argv, setup_logging
-from ws.data import SYCOPHANCY_NEG_PERSONAS, SYCOPHANCY_POS_PERSONAS, eval_topics, train_topics
+from ws.data import (
+    HONESTY_NEG_PERSONAS,
+    HONESTY_POS_PERSONAS,
+    HONESTY_PROMPT,
+    SYCOPHANCY_NEG_PERSONAS,
+    SYCOPHANCY_POS_PERSONAS,
+    _load_suffixes,
+    eval_topics,
+    train_topics,
+)
 from ws.diff import DIFF_FILENAME, load_diff
 from ws.eval.dilemmas import DilemmasCfg, _choice_logp, _load_eval
 from ws.eval.sycophancy import EVAL_HEADER as SYC_EVAL_HEADER
@@ -73,9 +82,23 @@ def _replace_block_output(output, x: Tensor):
 
 
 @torch.no_grad()
-def _capture_last_token_blocks(model, tok, prompts: list[str], *, system: str) -> Tensor:
+def _capture_last_token_blocks(
+    model,
+    tok,
+    prompts: list[str],
+    *,
+    system: str,
+    assistant_prefixes: list[str] | None = None,
+) -> Tensor:
     hooks = [f"model.layers.{layer}" for layer in range(model.config.num_hidden_layers)]
-    texts = [_chat_text(tok, user=prompt, system=system) for prompt in prompts]
+    if assistant_prefixes is None:
+        texts = [_chat_text(tok, user=prompt, system=system) for prompt in prompts]
+    else:
+        assert len(assistant_prefixes) == len(prompts)
+        texts = [
+            _chat_text(tok, user=p, system=system, assistant_prefix=a)
+            for p, a in zip(prompts, assistant_prefixes)
+        ]
     old_padding_side = tok.padding_side
     tok.padding_side = "left"
     enc = tok(texts, return_tensors="pt", padding=True, truncation=True, max_length=256).to(model.device)
@@ -91,15 +114,29 @@ def _capture_last_token_blocks(model, tok, prompts: list[str], *, system: str) -
     return torch.stack(rows, 0)
 
 
-def _fit_repe_directions(model, tok, n_train_topics: int) -> Tensor:
+def _fit_repe_directions(model, tok, n_train_topics: int, behavior: str) -> Tensor:
     """PCA(n=1) of (hs_pos - hs_neg) per layer, via torch SVD on centered diffs.
     PCA == SVD on mean-centered data; the first right singular vector (Vh[0])
     is the unit-norm principal direction. Matches vgel/repeng `pca_diff`.
     Sign-correct so the positive class projects larger along the returned direction.
     """
-    prompts = [f"I think {claim}. {question}" for claim, question in train_topics()[:n_train_topics]]
-    hs_pos = _capture_last_token_blocks(model, tok, prompts, system=SYCOPHANCY_POS_PERSONAS[0]).float()
-    hs_neg = _capture_last_token_blocks(model, tok, prompts, system=SYCOPHANCY_NEG_PERSONAS[0]).float()
+    if behavior == "sycophancy":
+        prompts = [f"I think {claim}. {question}" for claim, question in train_topics()[:n_train_topics]]
+        sys_pos = SYCOPHANCY_POS_PERSONAS[0]
+        sys_neg = SYCOPHANCY_NEG_PERSONAS[0]
+        assistant_prefixes = None
+    elif behavior == "honesty":
+        # Branching-suffix convention (vgel/repeng `repe`): persona + user_msg + assistant=suffix.
+        # Capture last-token activations of the suffix continuation under each persona.
+        entries = _load_suffixes(thinking=False)[:n_train_topics]
+        prompts = [e["user_msg"] for e in entries]
+        assistant_prefixes = [e["suffix"] for e in entries]
+        sys_pos = HONESTY_PROMPT.format(persona=HONESTY_POS_PERSONAS[0])
+        sys_neg = HONESTY_PROMPT.format(persona=HONESTY_NEG_PERSONAS[0])
+    else:
+        raise ValueError(f"unknown behavior: {behavior}")
+    hs_pos = _capture_last_token_blocks(model, tok, prompts, system=sys_pos, assistant_prefixes=assistant_prefixes).float()
+    hs_neg = _capture_last_token_blocks(model, tok, prompts, system=sys_neg, assistant_prefixes=assistant_prefixes).float()
     n_layers, n_prompts, d = hs_pos.shape
     diffs = hs_pos - hs_neg
     diffs_centered = diffs - diffs.mean(dim=1, keepdim=True)
@@ -384,7 +421,7 @@ def main(cfg: ActivationBaselineCfg) -> None:
     model = AutoModelForCausalLM.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, device_map="auto")
     model.eval()
 
-    directions = _fit_repe_directions(model, tok, cfg.n_train_topics)
+    directions = _fit_repe_directions(model, tok, cfg.n_train_topics, cfg.behavior)
     w = load_diff(cfg.out / cfg.behavior / cfg.dw_adapter / DIFF_FILENAME)
 
     syc = pl.concat([
