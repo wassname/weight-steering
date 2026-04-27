@@ -158,6 +158,11 @@ def alignment_table(
 
 def summarize_by_kind(df: pl.DataFrame) -> pl.DataFrame:
     """Group by kind (q_proj / o_proj / ...): mean ± std of alignment ratios."""
+    if df.is_empty():
+        return pl.DataFrame(schema={"kind": pl.Utf8, "mean_ratio_top": pl.Float64,
+                                    "std_ratio_top": pl.Float64, "mean_ratio_weak": pl.Float64,
+                                    "std_ratio_weak": pl.Float64, "mean_norm": pl.Float64,
+                                    "n": pl.UInt32})
     return (
         df.group_by("kind")
         .agg(

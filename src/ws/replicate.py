@@ -36,15 +36,17 @@ class Cfg:
     n_personas: int = 5
     n_samples: int = 10
     rank: int = 32
-    lr: float = 1e-5
+    lr: float = 2e-4
     epochs: float = 1.0
     max_steps: int = -1
     out: Path = Path("out")
+    # Shared data dir — kept separate from out so multiple runs reuse the same pairs.
+    data_root: Path = Path("out/data")
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
 
 
 def _maybe_data(cfg: Cfg) -> Dataset:
-    data_root = cfg.out / "data"
+    data_root = cfg.data_root
     behavior_dir = data_root / cfg.behavior
     expected = cfg.n_topics * cfg.n_personas * cfg.n_samples
     if behavior_dir.exists():

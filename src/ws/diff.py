@@ -67,7 +67,9 @@ def compute_diff(
     """w = delta_pos - delta_neg, only over keys present in both."""
     keys = set(delta_pos) & set(delta_neg)
     if not keys:
-        raise ValueError("no overlapping keys between pos and neg deltas")
+        logger.warning("compute_diff: no overlapping keys -- both deltas may be zero "
+                       "(e.g. IA3 with too few training steps). Returning empty diff.")
+        return {}
     w = {k: delta_pos[k] - delta_neg[k] for k in keys}
     norm = float(sum((v.float() ** 2).sum() for v in w.values()) ** 0.5)
     pos_norm = float(sum((v.float() ** 2).sum() for v in delta_pos.values()) ** 0.5)

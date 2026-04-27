@@ -19,6 +19,16 @@ smoke *ARGS:
         {{ARGS}} \
         2>&1 | tee {{SMOKE_LOG}} | tail -200
 
+# Smoke all 7 adapter variants sequentially. ~7 min on CPU.
+smoke-sweep:
+    just smoke --adapter lora
+    just smoke --adapter dora
+    just smoke --adapter pissa
+    just smoke --adapter delora
+    just smoke --adapter oft
+    just smoke --adapter boft
+    just smoke --adapter ia3
+
 # Generate +/- pair data for a behavior. Writes to out/data/{behavior}/.
 data:
     uv run python -m ws.data --model {{model}} --behavior {{behavior}}

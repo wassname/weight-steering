@@ -23,6 +23,7 @@ from pathlib import Path
 import torch
 from datasets import Dataset
 from loguru import logger
+from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 # 5 positive + 5 negative personas (paper §3, Appendix C / persona-vectors).
@@ -190,7 +191,7 @@ def generate_pairs(cfg: DataCfg) -> Path:
     model.eval()
 
     rows = []
-    for i, spec in enumerate(specs):
+    for i, spec in enumerate(tqdm(specs, desc=f"gen {cfg.behavior}", mininterval=60)):
         sys_pos = sys_pos_list[spec["persona_idx"]]
         sys_neg = sys_neg_list[spec["persona_idx"]]
         r_pos = _gen(model, tok, sys_pos, spec["prompt"], cfg.max_new_tokens, cfg.temperature)
@@ -206,8 +207,6 @@ def generate_pairs(cfg: DataCfg) -> Path:
             "sample_idx": spec["sample_idx"],
             "behavior": cfg.behavior,
         })
-        if (i + 1) % 25 == 0:
-            logger.info(f"generated {i + 1}/{n}")
 
     ds = Dataset.from_list(rows)
     out_dir = cfg.out / cfg.behavior

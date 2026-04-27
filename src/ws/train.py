@@ -5,6 +5,9 @@ One function per adapter family selectable via `adapter`:
   - dora       : LoraConfig(r, use_dora=True)
   - pissa      : LoraConfig(r, init_lora_weights="pissa")
   - delora     : DeloraConfig(r)   # peft >= 0.13
+  - oft        : OFTConfig(oft_block_size=8)  -- orthogonal rotation
+  - boft       : BOFTConfig(boft_block_size=8) -- butterfly OFT
+  - ia3        : IA3Config(k/v/down_proj)     -- input scaling, no layers_to_transform
 
 System prompt is stripped at train time so the adapter learns the behavior
 unconditionally on the narrow distribution (paper §3, Appendix B).
@@ -35,11 +38,11 @@ class TrainCfg:
     behavior: str = "sycophancy"
     sign: str = "pos"  # "pos" | "neg"
     adapter: str = "lora"  # "lora" | "dora" | "pissa" | "delora"
-    # Paper / upstream Axolotl: rank=32, alpha=16, lr=1e-5, warmup=5, wd=0.01.
-    # Note alpha/rank=0.5 (paper) vs old default 2.0 — paper is 4x weaker per LoRA.
+    # Paper / upstream Axolotl config: rank=32, alpha=64, lr=2e-4, warmup=5, wd=0.01.
+    # alpha/rank=2.0 (standard LoRA). lr=2e-4 matches QLoRA convention for instruct fine-tuning.
     rank: int = 32
-    alpha: int = 16
-    lr: float = 1e-5
+    alpha: int = 64
+    lr: float = 2e-4
     weight_decay: float = 0.01
     warmup_steps: int = 5
     epochs: float = 1.0
@@ -93,6 +96,27 @@ def make_peft_config(adapter: str, rank: int, alpha: int,
         return DeloraConfig(
             task_type=TaskType.CAUSAL_LM, r=rank,
             target_modules=LINEAR_TARGETS, **extra,
+        )
+    if adapter == "oft":
+        from peft import OFTConfig  # type: ignore
+        # rank unused; oft_block_size=8 divides typical hidden dims (512/1024/2048/4096).
+        return OFTConfig(
+            task_type=TaskType.CAUSAL_LM, oft_block_size=8,
+            target_modules=LINEAR_TARGETS, **extra,
+        )
+    if adapter == "boft":
+        from peft import BOFTConfig  # type: ignore
+        return BOFTConfig(
+            task_type=TaskType.CAUSAL_LM, boft_block_size=8,
+            target_modules=LINEAR_TARGETS, **extra,
+        )
+    if adapter == "ia3":
+        from peft import IA3Config  # type: ignore
+        # IA3 doesn't support layers_to_transform; target_modules fixed to k/v/down.
+        return IA3Config(
+            task_type=TaskType.CAUSAL_LM,
+            target_modules=["k_proj", "v_proj", "down_proj"],
+            feedforward_modules=["down_proj"],
         )
     raise ValueError(f"unknown adapter: {adapter}")
 

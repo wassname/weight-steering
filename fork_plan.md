@@ -282,3 +282,63 @@ User-observable result throughout: a markdown table per phase, not a "I did it."
 - Sycophancy data: regenerate using Qwen3-0.6B as the +/- responder, or use the paper's released data if available? (Default: regenerate with Qwen3-0.6B since 0.6B's distribution differs from 7B's.)
 - Layer selection for the diff: paper does per-layer sweeps (Appendix E). For phase 1 just take all layers; for phase 3, sweep.
 - Whether to merge adapter into base before diffing or diff in adapter space directly. Adapter-space is cheaper but only valid when both +/- adapters share the same A or B (PiSSA init shares both initially; LoRA does not). Default: merge into delta-W space, then diff. This makes all adapters comparable.
+
+# 2026-04-27 09:54:33
+
+Yes. These are **parameterization / factorization tests** of `dW`.
+
+Minimal plan:
+
+1. **Baseline**
+   - base model
+   - prompt baseline
+   - activation steering baseline
+   - full `dW`
+
+2. **Layer ablation**
+   - keep only layer `L`’s `dW`
+   - or remove layer `L` from full `dW`
+   - tells where steering is causally located by layer
+
+3. **SVD split of `dW`**
+   - per tensor: `dW = U S Vᵀ`
+   - test top-k vs tail:
+     - `top8`
+     - `top32`
+     - `tail`
+   - tells whether steering is low-rank or distributed
+
+4. **Read/write subspace projections**
+   - project `dW` into:
+     - write space
+     - write-not-read
+     - super read: `[q,k,v,up,gate]`
+     - super write: `[o,down]`
+   - test projected part vs complement
+
+5. **Magnitude vs angle / rotation**
+   - yes, this is a parameterization test.
+   - split weight change into:
+     - norm/magnitude change
+     - direction/rotation change
+   - especially relevant for `DeLoRA`, `DoRA`, `OFT`.
+
+Do this for **Qwen + Gemma**, but first on Qwen only to debug.
+
+DD coverage note: current default DD eval is **not full split**. It uses the
+first 100 dilemmas = 200 rows, balanced 100 honest-label and 100 dishonest-label
+actions, then sign-flips by `honesty_label`. Full `honesty_eval` test is 219
+dilemmas = 438 rows. So current tables are all rows for the selected dilemmas,
+not only honest rows, and not the full split unless `--n-dilemmas 219`.
+
+Adapter replication note: we've done the adapter sweep on Qwen3-0.6B. For Gemma
+1B, do a small replication first: LoRA / PiSSA / DeLoRA, seed 0, full DD split,
+then only add more seeds/adapters if the ranking differs or DeLoRA stays best.
+
+Core table should be:
+
+| intervention | kept params | DD effect | syc effect | retention vs full |
+|---|---:|---:|---:|---:|
+
+If top-k or write-not-read keeps effect, we found a simple steering parameterization.  
+If only many layers/tail/complement keeps effect, it’s distributed.
