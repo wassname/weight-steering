@@ -13,15 +13,15 @@
 > just smoke           # full pipeline on tiny-random qwen3 + BEARTYPE=1, ~1 min
 > just replicate       # data → train pos → train neg → diff → eval → subspace
 > just subspace-align  # phase 2: SVD top-k + weak-readout alignment table
-> just adapter-sweep   # phase 3: LoRA / DoRA / PiSSA / DeLoRA sweep (TODO)
-> just eval-dilemmas   # phase 4: daily-dilemmas Yes/No logratio (TODO)
+> just adapter-sweep   # phase 3: LoRA / DoRA / PiSSA / DeLoRA sweep
+> just eval-dilemmas   # phase 4: daily-dilemmas Yes/No logratio
 > ```
 > Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_subspace,run_sweep}.py`,
 > `src/ws/eval/{sycophancy,dilemmas}.py`. Outputs to `out/<behavior>/<adapter>/`.
 >
-> **Scope.** Not a strict replication. Now matches paper-style recipe on data
+> Scope. Not a strict replication. Now matches paper-style recipe on data
 > (20 train + 12 eval topics × 5 personas × 10 samples = 1000 pairs;
-> judge filter stubbed, off by default — paper uses GPT-4.1-mini) and
+> judge filter stubbed, off by default, paper uses GPT-4.1-mini) and
 > current PEFT hyperparams (rank 32 / LoRA α 64 / lr 2e-4 / warmup 5 /
 > wd 0.01 / seed 0 / one epoch).
 > Deliberate divergences from upstream: no quantized base loading
@@ -38,7 +38,7 @@
 
 ## Current internal findings (N=1; exploratory)
 
-These numbers are **single-seed, single-model research notes**, not a full
+These numbers are single-seed, single-model research notes, not a full
 benchmark. All rows below use `Qwen/Qwen3-0.6B`, seed 0, shared generated
 sycophancy data, PEFT adapters trained for one epoch on layers 8-21 (30%-80%
 of 28 layers) except IA3, whose PEFT config does not support
@@ -47,18 +47,18 @@ LoRA-family adapters are `q/k/v/o/gate/up/down_proj`.
 
 ### What was measured
 
-- **Sycophancy ID eval:** held-out sycophancy Yes/No prompts, 12 eval rows per
+- Sycophancy ID eval: held-out sycophancy Yes/No prompts, 12 eval rows per
     coefficient. Metric is `mean_logratio = log p(Yes) - log p(No)`; larger
     means more sycophantic agreement. `pmass` is probability mass on Yes/No, a
     sanity check that the model is answering in-format.
-- **Daily dilemmas OOD eval:** `wassname/daily_dilemmas-self-honesty`,
-    `honesty_eval`, first 100 dilemmas = 200 action rows per nonzero coefficient.
+- Daily dilemmas OOD eval: `wassname/daily_dilemmas-self-honesty`,
+    `honesty_eval`, full split of 219 dilemmas = 438 action rows per coefficient.
     Metric is `logratio_honesty = (log p(Yes) - log p(No)) * honesty_label`, so
-    larger means more honest. Tables below use **base persona only**. A previous
+    larger means more honest. Tables below use base persona only. A previous
     summary accidentally averaged `base@0` with the AxBench `honest_engineer`
     persona baseline; `cross_adapter_v9.py` now reads `dilemmas_per_row.csv` and
     filters `persona == "base"`.
-- **Projection diagnostic:** not a benchmark. It decomposes residual-output
+- Projection diagnostic: decomposes residual-output
     weights (`o_proj`, `down_proj`) into the part inside a post-hoc activation
     PCA subspace (`project_act_block`) and its orthogonal remainder
     (`complement_act_block`) to test whether low overlap hides the load-bearing
@@ -68,29 +68,39 @@ LoRA-family adapters are `q/k/v/o/gate/up/down_proj`.
 
 Sycophancy in-distribution steering:
 
-| adapter | spread `α=+2 minus -2` | delta `α=+1 minus 0` | min pmass | read |
-|---------|------------------------:|----------------------:|----------:|------|
-| delora  | **+23.85** | **+9.80** | 0.788 | strongest raw, but saturates at `α=2` |
-| pissa   | +17.40 | +6.00 | 0.999 | strongest clean/stable baseline |
-| dora    | +9.76 | +2.64 | 1.000 | decent |
-| oft     | +7.24 | +1.99 | 1.000 | weaker |
-| lora    | +4.09 | +1.00 | 1.000 | weak in this run |
-| ia3     | +0.86 | +0.26 | 1.000 | near no-op |
+| adapter | spread `α=+2 minus -2` | delta `α=+1 minus 0` | min pmass | read                                  |
+| ------- | ---------------------: | -------------------: | --------: | ------------------------------------- |
+| delora  |                 +23.85 |                +9.80 |     0.788 | strongest raw, but saturates at `α=2` |
+| pissa   |                 +17.40 |                +6.00 |     0.999 | strongest clean/stable baseline       |
+| dora    |                  +9.76 |                +2.64 |     1.000 | decent                                |
+| oft     |                  +7.24 |                +1.99 |     1.000 | weaker                                |
+| lora    |                  +4.09 |                +1.00 |     1.000 | weak in this run                      |
+| ia3     |                  +0.86 |                +0.26 |     1.000 | near no-op                            |
 
-Daily-dilemmas OOD honesty transfer, base persona only:
+Daily-dilemmas OOD honesty transfer, base persona only, full split (438 rows / coeff):
 
 | adapter | `α=-1` | `α=0` | `α=+1` | delta `+1 minus 0` | pmass @ `+1` |
-|---------|-------:|------:|-------:|--------------------:|-------------:|
-| delora  | -0.29 | 1.32 | 2.02 | **+0.70** | 0.947 |
-| dora    | 0.73 | 1.32 | 1.72 | +0.41 | 0.940 |
-| pissa   | 0.44 | 1.32 | 1.69 | +0.37 | 0.980 |
-| oft     | 1.09 | 1.32 | 1.57 | +0.26 | 0.932 |
-| lora    | 1.09 | 1.32 | 1.55 | +0.23 | 0.933 |
-| ia3     | 1.29 | 1.32 | 1.35 | +0.03 | 0.938 |
+| ------- | -----: | ----: | -----: | -----------------: | -----------: |
+| delora  |  -0.31 |  1.33 |   2.04 |              +0.71 |        0.942 |
+| dora    |  +0.75 |  1.33 |   1.73 |              +0.40 |        0.941 |
+| pissa   |  +0.45 |  1.33 |   1.69 |              +0.37 |        0.980 |
+| oft     |  +1.10 |  1.33 |   1.56 |              +0.24 |        0.931 |
+| lora    |  +1.09 |  1.33 |   1.55 |              +0.23 |        0.933 |
+| ia3     |  +1.30 |  1.33 |   1.36 |              +0.03 |        0.937 |
 
 Takeaway: DeLoRA is the best raw steerer on both sycophancy and daily
 dilemmas. PiSSA is still the best "clean" adapter if you penalize DeLoRA's
 `α=2` saturation on the sycophancy eval.
+
+### Baselines
+
+- T1 activation steering (RepE-style): best dd_delta = +0.071 at layer 9, `α=-4`
+    (`out/sycophancy/activation_baseline/summary.csv`). Roughly comparable to
+    the ia3 weight-steerer (+0.03), which is essentially a no-op; the
+    structurally meaningful weight-steered adapters (lora/oft/dora/pissa/delora)
+    range +0.23 to +0.71, all several times stronger than RepE on these rows.
+- T3 prompt baseline (AxBench-style engineered prompt): rerun in flight
+    (pueue 191), see `out/sycophancy/prompt_baseline/summary.csv` when done.
 
 ### Subspace/projection lesson
 
@@ -98,29 +108,29 @@ The original question was: can we find the subspace or parameterization that
 explains the difference between the positive and negative LoRAs? So far we
 tested three kinds of explanations:
 
-- **Parameterization:** LoRA / DoRA / PiSSA / DeLoRA / OFT / IA3. Adapter
+- Parameterization: LoRA / DoRA / PiSSA / DeLoRA / OFT / IA3. Adapter
     family changes steering strength a lot (DeLoRA raw, PiSSA stable), but it
     does not make the learned `dW` align with the tested act/weight subspaces.
-- **Mechanistic bases:** pretrained-weight read/write primitives, MLP/gate,
+- Mechanistic bases: pretrained-weight read/write primitives, MLP/gate,
     attention/QK/OV, attention-selected token bases, persona contrasts, and
     activation PCA. These all have low overlap with the LoRA weight oracle:
     about 1-8% across adapter families and LoRA layers.
 - Block-local activation PCA did not rescue this. The issue is not just that
     cumulative activations mix upstream layers.
 - A functional projection test says the PCA activation directions can be
-    **potent if amplified**, but the trained adapter's behavior is mostly not
+    potent if amplified, but the trained adapter's behavior is mostly not
     carried by that projected component at its learned scale.
 
 Projection diagnostic at K=32 on daily dilemmas (40 dilemmas / 80 rows; this
 is an ablation, not a full benchmark):
 
-| adapter | full Δ | residual-write Δ | raw projection / residual | normmatched projection / residual | complement / residual | read |
-|---------|-------:|-----------------:|--------------------------:|----------------------------------:|----------------------:|------|
-| delora  | +0.628 | +0.844 | 0.07 | 0.30 | 0.89 | trained behavior mostly outside act-PCA subspace |
-| pissa   | +0.373 | +0.242 | 0.47 | 1.14 | 0.64 | mixed: act-PCA is functional, not sole carrier |
-| oft     | +0.216 | +0.148 | -0.01 | 1.57 | 0.69 | act-PCA direction potent only after amplification |
+| adapter | full Δ | residual-write Δ | raw projection / residual | normmatched projection / residual | complement / residual | read                                              |
+| ------- | -----: | ---------------: | ------------------------: | --------------------------------: | --------------------: | ------------------------------------------------- |
+| delora  | +0.628 |           +0.844 |                      0.07 |                              0.30 |                  0.89 | trained behavior mostly outside act-PCA subspace  |
+| pissa   | +0.373 |           +0.242 |                      0.47 |                              1.14 |                  0.64 | mixed: act-PCA is functional, not sole carrier    |
+| oft     | +0.216 |           +0.148 |                     -0.01 |                              1.57 |                  0.69 | act-PCA direction potent only after amplification |
 
-Here **complement** means the residual-output part of `dW` after removing the
+Here `complement` means the residual-output part of `dW` after removing the
 activation-PCA subspace:
 
 $$dW_{\text{complement}} = (I - P_{\text{act},K}) dW.$$
@@ -137,96 +147,9 @@ or geometric basis (adapter family, attention basis, read/write basis, or PCA
 overlap with `dW`). The LoRA appears to write concept-space directions that
 downstream layers translate into Yes/No or honesty behavior; the tested
 low-rank readable bases do not capture the full mechanism.
->
-> Original README from upstream below.
-
----
-
-Code and data for the paper [Steering Language Models with Weight Arithmetic]().
-
-# Obtaining steering vectors
-
-##### 1. Get completions: Generate answers to a dataset, e.g.:
-
-```bash
-python inference_and_eval.py \
-    --model_repo meta-llama \
-    --models Llama-2-7b-chat-hf \
-    --dataset alignment_faking_harm_answers_chat:train_375exs \
-    --skip_judge_eval --generation_max_tokens 3000
-```
-
-##### 2. Create an [Axolotl](https://github.com/axolotl-ai-cloud/axolotl) configuration file that uses the data generated in (1).
-
-##### 3. Train model
-```bash
-python inference_and_eval.py \
-    --train --run_merge --delete_existing_repo \
-    --axolotl_config <axolotl_config_yaml_file> \
-    --model_dir <model_output_dir> \
-    --model_repo <model_repo> \
-    --models <model_name> \
-    --skip_model_inference --skip_judge_eval 
-```
-
-##### 4. Get weight steered model
-```bash
-python task_vectors.py \
-  --pretrained_model "meta-llama/Llama-2-7b-chat-hf" \
-  --finetuned_model1 "coastalcph/Llama-2-7b-chat-gsm8k_bs8_2e-4" \
-  --finetuned_model2 "coastalcph/Llama-2-7b-harmful-af-refuse" \
-  --finetuned_model3 "coastalcph/Llama-2-7b-chat-harmful-af-answer" \
-  --scale_t1 $scale_t1 --scale_t2 $scale_t2  --scale_t3 $scale_t2 \
-  --output_dir <output_dir> \
-  --output_model_name <hf_repo_and_model_name>
-```
-
-To obtain the steering vector for **activation steeering** we use the code from ["Persona Vectors: Monitoring and Controlling Character Traits in Language Models"](https://github.com/safety-research/persona_vectors).
-
-# Evaluations
-
-### Run inference and evaluation on a model
-```bash
-python inference_and_eval.py \
-    --model_repo <hf_repo> --models <model_name> \
-    --dataset sycophancy_eval_answer:test \
-    --eval_function eval_sycophancy_answer \
-    --use_claude_judge --api_key ANTHROPIC_API_KEY_BATCH
-```
-
-### Run inference and evaluation with activation steering
-
-```bash
-python inference_and_eval.py \
-    --model_repo Qwen --models Qwen2.5-7B-Instruct \
-    --dataset sycophancy_eval_answer:test \
-    --use_steering_inference \
-    --steer_coeff ${coeff} \
-    --steering_vector_type sycophancy --steering_bs 60 \
-    --use_steering_layer 12 \
-    --eval_function eval_sycophancy_answer \
-    --use_claude_judge --api_key ANTHROPIC_API_KEY_BATCH
-```
-
-This uses `steering_inference.py` and `activation_steering.py`, which have been adapted with minor changes from [github/persona_vectors](https://github.com/safety-research/persona_vectors).
-
-## Data
-
-* Sycophancy in TruthfulQA and TriviaQA: [cfierro/sycophancy_eval_answer](https://huggingface.co/datasets/cfierro/sycophancy_eval_answer). The data was taken from ["Towards Understanding Sycophancy in Language Models"](https://github.com/meg-tong/sycophancy-eval).
-
-* GCD-Sycophancy: [cfierro/gcd](https://huggingface.co/datasets/cfierro/gcd). Note that the incorrect split needs to be filter out to make sure the answer from the correct and incorrect reasoning are different (around 400 are filtered out).
-
-* Evil evaluation: The data was taken from ["Reward hacking behavior can generalize across tasks"](https://github.com/keing1/reward-hack-generalization/tree/main).
-
-* Refusal evaluation:
-    * Safety evaluation: [GSMDanger](https://huggingface.co/datasets/vfleaking/GSM-Danger) and [DirectHarm4](https://huggingface.co/datasets/vfleaking/DirectHarm4) were taken from ["Keeping LLMs Aligned After Fine-tuning: The Crucial Role of Prompt Templates"](https://github.com/vfleaking/PTST).
-
-    * GSM8K: We use the main configuration and test split from [openai/gsm8k](https://huggingface.co/datasets/openai/gsm8k).
-
-    * Safety training: We use the data from ["Lessons From Improving the Safety of Large Language Models that Follow Instructions"](https://github.com/vinid/safety-tuned-llamas/blob/main/data/training/safety_only_data_Instructions.json)
-
 
 # Cite
+
 ```bibtex
 @article{FierroRoger2025,
   author    = {Constanza Fierro and Fabien Roger},

@@ -473,3 +473,153 @@ diffs), which gets `preserved_E = 0.109` at rank 8. Above null but loses
 
 - nbs/v10_llama.py
 - out/sycophancy/lora/v10/{v10_wendler_metrics.png, v10_wendler_metrics.pdf, v10_table.tsv, v10_caption.md, v10_per_layer.csv}
+
+## 2026-04-27 fork_plan T1-T8 status check (dev)
+
+Walked through fork_plan tasks T1-T8 against the latest CSVs to see which UAT
+goals are ticked.
+
+T1 activation steering baseline (`out/sycophancy/activation_baseline/summary.csv`).
+Repeng on layers 8-21, full 438-dilemma set (dd_zero=+0.195, syc_zero=+2.698).
+Best repeng dd_delta = +0.071 (layer 9, coeff=-4); at coeff=+1 the best is
++0.0070 (layer 13). dW:delora at coeff=+1 is dd_delta=+0.337 on this same
+slice. Activation steering on this dataset is essentially noise; the trained
+weight diff carries roughly 50x more daily-dilemmas signal at matched coeff.
+
+T2 cross-adapter on full daily-dilemmas, base persona only
+(`out/sycophancy/cross_adapter_full_dd/dilemmas_summary.csv`, 438 rows).
+At coeff=+1 vs base@0:
+
+| adapter | delta_vs_0 |
+|---------|-----------|
+| delora  | +0.711 |
+| dora    | +0.404 |
+| pissa   | +0.368 |
+| oft     | +0.236 |
+| lora    | +0.229 |
+| ia3     | +0.033 |
+
+Same DeLoRA > DoRA > PiSSA ordering as the v9 100-dilemma slice. IA3 still flat.
+
+T3 prompt baseline (`out/sycophancy/prompt_baseline/summary.csv`). Engineered
+prompt vs base @ coeff=0 = +0.370. Simple "be honest" prompt = -0.520
+(backfires). DeLoRA dW @ coeff=+1 = +0.711 still beats the strongest prompt
+intervention by 1.9x. AxBench-style claim survives on the full 438-row split.
+
+T6 cross-adapter causal dW basis ablation
+(`out/sycophancy/cross_adapter_ablation/summary.csv`). At coeff=+1, top three:
+delora/residual_write_full +0.907, delora/shared_keep K=32 +0.736,
+delora/full_all_tensors +0.711. shared_drop K=8 keeps +0.436 (32% loss);
+random_keep across all adapters lands at <=+0.022 (effectively zero). Shared
+top-K SVD basis is a legitimate causal carrier, the random control isn't.
+
+T7 layer/module ablation. `out/sycophancy/layer_module_ablation/` is empty;
+re-running as pueue 196 after the IA3 zero-tensor fix in
+`src/ws/eval/layer_module_ablation.py:_select()`. Pending.
+
+T8 parameterization ablation
+(`out/sycophancy/parameterization_ablation/summary.csv`). Headline: per-adapter
+top energy crops match or beat full_dW. delora/top_90pct_energy_S =
+dd_delta +0.962 (full_dW = +0.711, +35%). dora/top_90pct = +0.415
+(full +0.404). pissa/top_25pct = +0.381 (full +0.368). lora/top_90pct = +0.224
+(full +0.229). The top quartile/decile by SVD energy is doing all the work.
+The complementary drops (`residual_not_top_*`, mid_50pct_S, bottom_25pct_S)
+collapse to <=0.02 dd_delta everywhere. IA3 is weak across the board
+(full_dW = +0.033, max variant +0.024). The trained dW lives in its top SVD
+modes, consistent with the v9/v10 "concept-write" reading.
+
+Tick list:
+- Done: T1, T2, T3, T6, T8
+- Pending: T7 (pueue 196 after IA3 fix)
+- Open: T4 multiseed, T5 Gemma replication
+
+The biggest update from today is T8: the keep_top_X energy crops reproduce
+full_dW behavior, and drop_top crops zero out, which is a stronger version of
+"the dW is dominated by its top SVD components" than v9 had. Combined with T6
+shared_keep K=32 retaining 73% of DeLoRA's effect, this is mild evidence for
+a low-rank shared basis at the dW level even though the act-PCA basis missed
+it (v9/v10).
+
+# lens search on hold pending multiseed 2026-04-27
+
+After running T6 (cross-adapter `dW` basis), T7 (layer/module), and T8
+(parameterization, own-SVD lens) and sketching T9 (native parameterization
+decompositions per adapter), every weight-space lens we tested has a
+built-in failure mode that prevents a parameterization-invariant mechanism
+claim, *modulo a major caveat at the bottom of this entry*:
+
+- **SVD-on-`dW`**: tautological for low-rank adapters. `dW = AB^T` has only
+  rank `r` nonzero singulars by construction, so "top-K S retains the
+  behavior" is mostly a property of the adapter's parameterization, not a
+  finding about the model. The own-SVD top-25%-S concentration table shows
+  this — keep ≈ full and drop ≈ 0 for delora/dora/lora/oft/pissa, but that's
+  expected for any low-rank dW.
+- **Layer-index**: tells you depth, not mechanism. Doesn't separate read
+  from write, doesn't see circuits, doesn't see heads or positions.
+- **Module-family**: collapses heads and sequence positions. Cross-adapter
+  results disagree (delora's residual_write retained=+1.27, lora's=+0.14)
+  so there's no stable "the behavior lives in module X" story.
+- **Native parameterization (T9 sketch)**: per-adapter decompositions
+  (DoRA mag/dir, OFT rotation, IA3 scale) aren't comparable across adapter
+  families by construction. Best-case answer is "DoRA stores it in the
+  magnitude vector," which doesn't translate to LoRA or OFT.
+
+Cross-adapter SVD-subspace overlap (do top-K U/V of the 6 adapters' dW span
+the same subspace?) is the one weight-space test that could give a
+parameterization-invariant signal. Not run. Activation-space cross-adapter
+comparison was also raised; user judged activations to be a symptom, not
+the cause.
+
+What survives: trained `dW` is **causally necessary** for the behavior
+(drop tests across all three lenses give retained ≈ 0 for the
+complement). What's not supported: any **parameterization-invariant
+mechanism** claim. Dropping the lens search.
+
+Pueue 215 (T8 v2 with base-W SVD lens + norm-matched random keep) and 216
+(T7 v2 with read-side modules q/k/v/up/gate) are queued behind lora-lite
+job 214. They would close two of the four catalog coverage gaps but won't
+change the headline. Leaving queued for now; they're cheap if they run.
+
+Priority redirect: T4 multi-seed and T5 Gemma 1B replication. Both are in
+the *benchmark* half of the plan, not the analysis half, and both are
+currently N=1.
+
+# two-goal frame and coverage gaps 2026-04-27
+
+Reframed everything as two goals so the writeup stops mixing them.
+
+Goal A (descriptive, post-hoc): given trained dW, find a coordinate system
+that makes it sparse / low-rank / interpretable. Lenses run so far: dW's own
+SVD (T8), layer index (T7), module family (T7), shared cross-adapter SVD (T6
+shared_keep). Lenses not run: base-W SVD `dS = U0.T @ dW @ V0h`, activation
+PCA at the dW level, adapter-architecture decompositions (DoRA mag/dir,
+DeLoRA lambda/dir, OFT rotation, IA3 gates).
+
+Goal B (constructive, deferred): predict `dW'` from pretrained W and base
+activations alone, no training. Candidates: TaskDiff/RepE persona contrast,
+function vectors, write-not-read, OV-write, gate-kernel, signed SAE,
+ReFT-r1, attention min/max/diff. Benchmark = trained vs constructed dW on
+identical DD rows. None run yet.
+
+Single measure across both: `retained = dd_delta(ablated) / dd_delta(full)`
+at coeff=+1, base persona, idx_symmetric_diff=0. Necessity (drop test):
+no norm-matching needed. Sufficiency (keep test): norm-matched random
+control matters because cropping shrinks Frobenius norm and the model is
+nonlinear in alpha. T7 has `random_norm_matched_full`; T8 lacks it.
+
+Coverage gaps to flag in writeup:
+1. Read-side modules (q/k/v/up/gate-only) absent from T7 variants. Any
+   read-side mechanism story is currently untestable.
+2. Base-W SVD lens absent. T8 uses each tensor's own SVD; catalog spec'd
+   base-W SVD as a separate lens. Both are valid, just different questions.
+3. Adapter-architecture decompositions absent from T8 variant set.
+4. T8 sufficiency claims lack a norm-matched random keep control.
+
+Notebook: `nbs/ablation_analysis.py` consumes T7+T8 CSVs and emits three
+lens figures and a joint summary table. Runs end-to-end on current outputs.
+
+Cleanup: deleted superseded notebooks (`analyze_diff*`, `cross_adapter_v9`,
+`figures_v2`, `functional_projection_v10`, `hypothesis_sweep_v5-v9`,
+`strong_conclusion_v4`, `v10_llama`) and their result dirs
+(`out/sycophancy/{cross_adapter_v9,v10_alpha_sweep,v10_functional_projection}`).
+Kept `nbs/ablation_analysis.py` as the single notebook.

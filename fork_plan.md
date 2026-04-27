@@ -42,8 +42,10 @@ Current behavior: sycophancy training, evaluated on sycophancy Yes/No and `wassn
   - [src/ws/steer.py](src/ws/steer.py)
   - [src/ws/eval/sycophancy.py](src/ws/eval/sycophancy.py)
   - [src/ws/eval/dilemmas.py](src/ws/eval/dilemmas.py)
-  - [nbs/cross_adapter_v9.py](nbs/cross_adapter_v9.py)
-  - [nbs/functional_projection_v10.py](nbs/functional_projection_v10.py)
+  - [src/ws/eval/cross_adapter_ablation.py](src/ws/eval/cross_adapter_ablation.py)
+  - [src/ws/eval/layer_module_ablation.py](src/ws/eval/layer_module_ablation.py)
+  - [src/ws/eval/parameterization_ablation.py](src/ws/eval/parameterization_ablation.py)
+  - [nbs/ablation_analysis.py](nbs/ablation_analysis.py)
 
 ## Current facts
 
@@ -55,6 +57,7 @@ Current behavior: sycophancy training, evaluated on sycophancy Yes/No and `wassn
 - v9/v10 do **not** prove “no subspace.” They show the trained behavior is not explained by the tested low-rank residual-stream bases or adapter-family parameterization at trained scale.
 - The active analysis should ablate the already-trained `dW`. Synthetic `dW'` construction is a different baseline, not causal ablation.
 - The highest-value analysis tests are: cross-adapter causal `dW` basis ablation, layer/module ablation of trained `dW`, and adapter-parameterization ablation of trained `dW`.
+- **Lens search is on hold pending multiseed (2026-04-27).** Every weight-space lens we tested has a built-in failure mode: SVD-on-`dW` is tautological for low-rank adapters; layer-index tells depth not mechanism; module-family collapses heads/positions and gives different answers per adapter; native parameterization decompositions aren't comparable across adapter families. *But* the lens-3 cross-adapter inconsistency (delora residual_write retained=+1.27 vs lora=+0.14) is N=1 seed × N=1 model. It might just be seed noise within each adapter. Right ordering: T4 multiseed first, then re-run T7/T8 per-seed with within-adapter stdev, then judge whether the inconsistency is real or noise.
 
 ## Done
 
@@ -71,20 +74,20 @@ Current behavior: sycophancy training, evaluated on sycophancy Yes/No and `wassn
 
 ## TODO: benchmark question
 
-- [ ] **Goal: activation-steering baseline on the same DD rows.**
+- [x] **Goal: activation-steering baseline on the same DD rows.**
   - Why: RepE/repeng is the most threatening baseline; if it matches or beats `dW`, the method story weakens before adapter seeds matter.
   - Do: train representation direction on the same sycophancy contrast; grid layer x coefficient; evaluate sycophancy and full DD.
   - UAT: best activation-steering row is selected by held-out sycophancy or validation DD, then reported beside best `dW` on identical DD test rows.
   - Verify: table includes `method=repeng`, `layer`, `coeff`, `syc_delta`, `dd_delta`, `pmass`, and the same `idx` set as the `dW` rows.
   - Negative outcome -> claim: if repeng matches/beats `dW`, write "activation steering is the simpler baseline; weight steering needs a stronger reason to exist."
 
-- [ ] **Goal: full daily-dilemmas benchmark for current Qwen adapters.**
+- [x] **Goal: full daily-dilemmas benchmark for current Qwen adapters.**
   - Why: current DD table uses first 100 dilemmas, not the full 219-dilemma split.
   - Do: re-run LoRA / PiSSA / DeLoRA / DoRA / OFT / IA3 with `--n-dilemmas 219`.
   - UAT: table has 438 base rows per coeff before persona baselines, and reports `pmass`, `frac_low_pmass`, `delta(+1 - 0)`.
   - Verify: `out/sycophancy/cross_adapter_full_dd/dilemmas_summary.csv` exists and includes `n_base_rows_per_coeff=438`.
 
-- [ ] **Goal: prompt baselines on the same DD rows.**
+- [x] **Goal: prompt baselines on the same DD rows.**
   - Why: weight steering is only interesting if it beats “just prompt it.”
   - Do: evaluate base, simple honest persona, and engineered AxBench-style prompt.
   - UAT: one table compares `base`, `simple_honest_prompt`, `engineered_prompt`, and best `dW` on identical rows.
@@ -106,7 +109,13 @@ Current behavior: sycophancy training, evaluated on sycophancy Yes/No and `wassn
 
 ## TODO: analysis question
 
-Active sequence:
+**Status (2026-04-27): on hold pending multiseed.** T6/T7/T8 are run on
+N=1 seed × Qwen3-0.6B. Necessity is established. The cross-adapter
+inconsistency that drove the "no parameterization-invariant mechanism"
+reading might be seed noise. Resume after T4 (multiseed) lands and we can
+report within-adapter stdev alongside cross-adapter gaps.
+
+Active sequence at the time of pause was:
 
 1. Cross-adapter causal `dW` basis ablation.
 2. Layer/module causal ablation of trained `dW`.
@@ -114,7 +123,7 @@ Active sequence:
 
 Synthetic `dW'` construction is deferred below and is not a causal ablation.
 
-- [ ] **Goal: cross-adapter causal `dW` basis ablation.**
+- [x] **Goal: cross-adapter causal `dW` basis ablation.**
   - Why: this is the headline analysis experiment. It tests whether different adapter families discovered the same causal planning subspace or different basins.
   - Do: build candidate bases `B` from trained adapter deltas, compute `dW_keep_B` and `dW_drop_B`, and evaluate both on sycophancy + full DD for each adapter.
   - Candidate `B` rows:
@@ -127,7 +136,9 @@ Synthetic `dW'` construction is deferred below and is not a causal ablation.
   - Negative outcome -> claim: if `keep_B_shared` retains <0.3x even at K=64 while complements/tails retain behavior, write the shared-subspace negative result: steering is distributed or lives in the wrong parameter space for these bases.
   - Ambiguous outcome -> claim: if both keep and drop retain high behavior, report non-identifiability under this basis family and move to stricter causal interventions, not a positive subspace claim.
 
-- [ ] **Goal: layer/module causal ablation of trained `dW`.**
+Note for the following two a search has been made of hypothesis: docs/hypothesis_ablation_catalog.md
+
+- [x] **Goal: layer/module causal ablation of trained `dW`.**
   - Why: after a trained update works, we need to know which layers and modules are necessary or sufficient.
   - Do: keep/drop parts of the already-trained adapter delta by layer and module family, without synthesizing new tensors from base features.
   - Rows: `full_dW`, `residual_write_only`, `attn_o_proj_only`, `mlp_down_proj_only`, `layers_8_21_only`, single-layer keep, leave-one-layer-out, coarse early/mid/late LoRA-layer blocks, rank/module-matched random controls, and `zero`.
@@ -136,7 +147,7 @@ Synthetic `dW'` construction is deferred below and is not a causal ablation.
   - Positive outcome -> claim: if a small layer/module slice retains most behavior and dropping it removes behavior, report the causal locus.
   - Negative outcome -> claim: if many disjoint slices retain behavior, report distributed or non-identifiable layer/module localization.
 
-- [ ] **Goal: adapter-parameterization causal ablation of trained `dW`.**
+- [x] **Goal: adapter-parameterization causal ablation of trained `dW`.**
   - Why: adapter families may store the behavior in different parameterization degrees of freedom even when their effective `dW` looks similar.
   - Do: split the trained adapter/effective delta according to the adapter family's own coordinates, then keep/drop each component on identical eval rows. For an S-space split, compute the trained effective matrix's SVD-like coordinate system, project `dW -> S`, crop a component such as the top 25% of `S` by coordinate index, project back to weight space, and evaluate both `top_25pct_S` and `residual_not_top_25pct_S` against `full_dW` and `zero`.
   - Rows: LoRA/PiSSA/DeLoRA rank components and S-space quartiles (`top_25pct_S`, `mid_50pct_S`, `bottom_25pct_S`, `residual_not_top_25pct_S`, `residual_not_bottom_25pct_S`); cumulative S-energy groups (`top_50pct_energy_S`, `top_90pct_energy_S`, residuals); DoRA direction vs magnitude component; OFT rotation-derived component vs residualized effective update; IA3 attention-gate vs MLP-gate groups.
@@ -144,6 +155,30 @@ Synthetic `dW'` construction is deferred below and is not a causal ablation.
   - Verify: all rows start from the trained adapter delta or trained adapter parameters; no row is constructed from base-only activations; every component shares the same sycophancy and DD row keys as `full_dW`; for each S-space crop, `component_dW + residual_dW` reconstructs `full_dW` within numerical tolerance.
   - Positive outcome -> claim: if one parameterization component retains most behavior and dropping it removes behavior, report which degree of freedom carries the learned behavior.
   - Negative outcome -> claim: if behavior is not localized by parameterization component, report the trained effect as distributed across that adapter parameterization.
+
+## Coverage gaps in current ablation set
+
+The three causal ablations above (cross-adapter `dW` basis, layer/module,
+adapter parameterization) leave some hypotheses untested. These are open
+follow-ups, not blockers for the current writeup.
+
+- [ ] **Read-side modules in the layer/module ablation.** Current variants
+  cover residual writes (`o_proj`, `down_proj`), attention-only, and
+  mlp-only, but not q/k/v-only or up/gate-only. Any read-side mechanism
+  story is currently untestable.
+- [ ] **Base-W SVD lens for the S-space ablation.** `parameterization_ablation.py`
+  uses each tensor's own SVD (`dW = U S Vh`). The catalog also wants a
+  separate lens using the base weight's SVD (`U0, S0, V0h = svd(W_base);
+  dS = U0.T @ dW @ V0h`), which answers "does `dW` ride pretrained
+  singular directions" rather than "is `dW` low-rank in its own basis".
+- [ ] **Adapter-architecture decompositions.** S-space variants do not
+  include DoRA magnitude vs direction, DeLoRA lambda vs direction, OFT
+  rotation, or IA3 attention-gate vs MLP-gate splits.
+- [ ] **Norm-matched random keep control for T8 sufficiency claims.**
+  Layer/module ablation has `random_norm_matched_full`; the S-space crops
+  do not. Necessity (drop) tests don't need this; sufficiency (keep) tests
+  do, because cropping shrinks Frobenius norm and the model is nonlinear
+  in alpha.
 
 ## Deferred / optional
 

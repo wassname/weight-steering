@@ -22,6 +22,9 @@ from torch import Tensor
 from transformers import AutoModelForCausalLM
 
 
+DIFF_FILENAME = "w.pt"
+
+
 def load_base_state(model_id: str, dtype=torch.bfloat16) -> dict[str, Float[Tensor, "..."]]:
     """Return CPU state dict of the pretrained base model. Snapshot once, reuse."""
     base = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
