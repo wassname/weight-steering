@@ -1,344 +1,162 @@
-## Context
+# Fork plan: weight steering benchmark + analysis
 
-So this is a fork of the excellent weight steering
+Updated: 2026-04-27
 
-> We isolate behavior directions in weight-space by subtracting the weight deltas from two small fine-tunes - one that induces the desired behavior on a narrow distribution and another that induces its opposite.
-> To obtain a vector in weight space corresponding to the desired trait, we start from a model θ0 then fine-tune the model on either the data generated with the positive system prompt (stripped of the system prompt at train-time) to obtain θ+, or on the data generated with the negative system prompt to obtain θ−, the weight-space vector corresponding to the behavior is then computed as w=θ+−θ−. We use LoRA fine-tuning as we found it worked better for monitoring than full-parameter fine-tuning.
+## Goal
 
+Test whether weight steering is a useful method, and if it is, understand what part of the learned weight delta carries the behavior.
 
-Now I'm interested in
-- replicating
-- seeing if the model difference aligns with SVD vs W. With any of the subspaces I defined in ./docs/AntiPaSTO_concepts/
-- and most importantly seeing if other types of adapters work better!
-- and becoming clear on
-    - does it generalise
-    - does performance degrate
-    - this likely means using it on one of the evals I'm familiar with namely daily dillemas from AntiPaSTO or eval awareness (but this requires rending a GPU so this is later)
+Two questions are intentionally separated:
 
-
-## Resources
-
-- **my lit review of PeFT adapter methods** ./docs/blog_adapter_as_hypothesis/README.md
-- my steering concepts ./docs/AntiPaSTO_concepts/README.md
-- orig paper
-    - docs/weight_steering_paper.md
-    - docs/weight_steer_blog.md
-
-
-## TODO
-
-- [x] plan to clean up the repo. uv, jaxtyping, einops. hooks not classes. remove vlm
-- [x] make it work on small models (Qwen3-0.6B), cheap+fast iteration
-- [x] hook in PEFT (LoRA / DoRA / PiSSA / DeLoRA via peft>=0.13)
-- [x] phase 1 replicate: w = θ+ - θ- on Qwen3-0.6B sycophancy, monotone logratio (task 40)
-- [x] phase 2 weight-only subspace alignment (SVD-of-W, weak-readout) — *negative result, see "Phase 2 reframe" below*
-- [x] phase A demos: adapter coherence + guided-CoT under w (task 44 — pmass=1.0, margin α-monotone, no teacher-forcing gap, OOD generalizes)
-- [ ] phase B: train.py val split done; 3-epoch re-run still pending
-- [ ] phase 2.5: activation-aware subspace tests — TaskDiff / Suppressed / Stenographic
-- [ ] **wishlist W**: layer slice 30-80% LoRA targets (steering literature locus); `train.py:LINEAR_TARGETS` patch
-- [ ] **wishlist N**: `notebooks/analyze_diff.py` (.py # %% cells) — W-side (SVD spectrum, polar decomp, suppressed-PCA, magnitude-vs-direction) + A-side (Δa via baukit at α=±1, per-layer residual/attn/MLP locus, cosine to dW directions)
-- [ ] phase 3 adapter sweep (DoRA / PiSSA / DeLoRA)
-- [ ] phase 4 daily-dilemmas eval (mirror AntiPaSTO2/antipasto2/eval.py)
-- [ ] **paper-deltas** (task 18, 16): match data recipe (5+/5- × 10 samples + judge filter) and LoRA hyperparams (rank 32, α 16, lr 1e-5, warmup 5)
-
-## Paper-deltas — what we match, what we deliberately skip
-
-Audit of upstream Axolotl YAMLs vs current code. Tracked as tasks 16 + 18.
-
-| upstream | ours | decision |
-|---|---|---|
-| 20 questions × 5 personas × 10 samples + GPT-4.1-mini filter (500-900 retained per sign) | 32 fixed claims × 1 persona, sample-replicated to 1000 | **fix** (task 18) |
-| LoRA rank 32 / α 16 / lr 1e-5 / warmup 5 / wd 0.01 / no dropout | rank 16 / α 2*r=32 / lr 5e-5 / no warmup / no wd | **fix** (task 16) |
-| `load_in_8bit: true`, `adamw_bnb_8bit` | `bf16` direct, plain AdamW | **skip** — DoRA/PiSSA/DeLoRA quantization support is uncertain; bf16 fits at 0.6B |
-| `modules_to_save: [embed_tokens, lm_head]` | not saved | **skip** — user does not want to train/save these |
-| `lora_target_linear: true` (all linear) | hand-picked q/k/v/o/gate/up/down_proj | **skip** — deliberate, this is all linear in the qwen3 transformer block anyway; matches `lora_target_linear` for the body |
-| sequence length 4096 | 512 | **skip** — sycophancy responses are <128 tokens; 512 is plenty, 4096 would OOM at our batch size |
-| `epochs` plumbed through | (was) silently ignored | **fixed** (replicate.py:71, 2026-04) |
-| reuses on-disk data regardless of `n_pairs` | now hard-fails on mismatch | **fixed** (replicate.py:_maybe_data, 2026-04) |
-
----
-
-# Fork plan: weight-steering → small-model + adapter sweep
+1. **Benchmark question:** Does weight steering beat simple alternatives such as prompting and activation steering on sycophancy and daily-dilemmas honesty transfer?
+2. **Analysis question:** If weight steering works, can the learned delta $dW = \theta^+ - \theta^-$ be factorized into a simpler causal intervention: a cross-adapter shared subspace, module, low-rank component, or adapter parameterization?
 
 ## Context
 
-This is a fork of Anthropic's weight-steering work (θ+ - θ- via LoRA fine-tunes on +/- system-prompted data). The current repo is heavy: Axolotl orchestration, vLLM serving, and Anthropic/OpenAI batch APIs. None of that is needed for what wassname actually wants:
-
-1. **Replicate** the core method on a small model so iteration is cheap.
-2. **Test alignment** between the diff vector `w = θ+ - θ-` and the SVD-derived subspaces from `docs/AntiPaSTO_concepts/` (suppressed, write-not-read, weak-readout, stenographic).
-3. **Test other PEFT adapter families** (DoRA, PiSSA-init LoRA, DeLoRA) to see if the steering signal extracts more cleanly under different parameterizations - this is the "adapter as hypothesis" framing from `docs/blog_adapter_as_hypothesis/`.
-4. **Generalization** via daily-dilemmas eval (later, GPU-gated).
-
-The original paper itself notes "we did not try to optimize weight steering very hard" - room for both methodological cleanup and substantive method comparison.
-
-User decisions captured: Qwen3-0.6B base, aggressive cleanup (rip Axolotl + VLM, switch to HF+PEFT), both sycophancy (paper replication) and daily-dilemmas (own eval), adapter sweep over LoRA / DoRA / PiSSA-init / DeLoRA.
-
-## Phase 0 — Repo cleanup (breaking, no backcompat)
-
-**Delete:**
-- `vllm_inference.py` (565 lines, vLLM serving)
-- `api_inference.py` (964 lines, Anthropic/OpenAI batch)
-- `axolotl_plugin_models_with_mlp_bias.py`, `axolotl_configs/`
-- `inference_and_eval.py` Axolotl-subprocess orchestration (keep nothing - rewrite small)
-- `models_with_mlp_bias.py` - replace with hooks; the MLP-bias variant isn't needed for the core θ+ - θ- replication
-
-**Add:**
-- `pyproject.toml` with uv (`torch`, `transformers`, `peft>=0.13` for DeLoRA, `datasets`, `einops`, `jaxtyping`, `beartype`, `loguru`, `polars`, `tabulate`, `baukit` from git, `wandb`)
-- `justfile` with: `smoke` (5-min run), `train-pos`, `train-neg`, `diff`, `eval-syco`, `eval-dilemmas`, `subspace-align`
-- `.python-version` (3.11)
-
-**Keep + simplify:**
-- `task_vectors.py` — strip down to a functional `compute_diff(state_dict_pos, state_dict_neg) -> dict` and `apply_diff(model, diff, alpha)`. Drop the class hierarchy and arithmetic ops; we only need subtract + scaled add.
-- `activation_steering.py` — already hook-based; replace manual hooks with `baukit.TraceDict` for cleanliness (per user CLAUDE.md preference).
-
-**New layout:**
-```
-weight-steering/
-├── src/ws/
-│   ├── data.py          # +/- system-prompt pair data generation (sycophancy first)
-│   ├── train.py         # PEFT-based finetune; one function per adapter type
-│   ├── diff.py          # compute_diff, apply_diff (functional, ~50 lines)
-│   ├── steer.py         # inference-time scaled application via baukit hooks
-│   ├── subspace.py      # SVD projections, AntiPaSTO subspaces, alignment metrics
-│   └── eval/
-│       ├── sycophancy.py
-│       └── dilemmas.py  # mirrors AntiPaSTO2/eval.py pattern
-├── scripts/
-│   ├── replicate.py     # phase 1 entrypoint
-│   ├── adapter_sweep.py # phase 3 entrypoint
-│   └── subspace_align.py
-├── notebooks/           # exploratory only
-└── justfile, pyproject.toml, .python-version
-```
-
-## Phase 1 — Replicate on Qwen3-0.6B with sycophancy
-
-**Data:** Generate +/- pairs using sycophantic vs honest system prompts on a sycophancy QA distribution (paper Appendix E recipe). Strip system prompt at train time. Target ~500-1000 pairs to keep iteration fast.
-
-**Train:** PEFT LoRA, rank 16, all linear layers, lr 5e-5, 1 epoch, bf16. Save θ+ and θ- as PEFT adapter state dicts. With Qwen3-0.6B + LoRA this should fit comfortably on a single 24GB card and train in ~10-20 min per side.
-
-**Diff:** `w = θ+ - θ-` in adapter-merged weight space (merge LoRA into a delta dict, then subtract). Functional, no class wrapper.
-
-**Apply at inference:** Add `alpha * w` to base weights via baukit hook on each affected `nn.Linear` (no in-place modification of base model). Sweep `alpha ∈ [-2, -1, 0, 1, 2]`.
-
-**Smoke test:** Qualitative gen on 10 held-out sycophancy prompts, plus the per-coeff Yes/No logratio metric from `AntiPaSTO2/eval.py`.
-
-## Phase A — Sanity demos on existing artifacts (cheap, no retraining)
-
-Why: task 40's pipeline never generates a single sentence of model output.
-The headline numbers (`mean_logratio +9.4 at α=+2`, `pmass=1.0`) are forward-pass-only,
-single-token reads. We don't yet know:
-
-1. Did the LoRAs converge or undertrain? Single epoch, slope -0.003/step at the end, no val loss.
-2. Were the adapters coherent at the end? No generation anywhere.
-3. Does the steering effect survive a 32-token rollout? Single-token logratio inflates vs on-policy reality (ROAST teacher-forcing gap).
-4. Does w generalize off the training topic distribution? Eval is in-distribution (`held_out = SYCOPHANCY_TOPICS[-16:]`).
-
-Two demos, both on the existing `out/sycophancy/lora/{pos,neg,w.pt}`:
-
-- **A1** (`run_demo.py:phase_a1`): load base + pos LoRA, generate 80 tokens on 2 in-dist + 1 OOD claim. Same for neg. Pass = pos *agrees*, neg *pushes back*, both fluent. **Built**, not yet run.
-- **A2** (`run_demo.py:phase_a2`, `eval/guided_cot.py`): for each (claim, alpha) pair, rollout 32 tokens of CoT under `weight_steer(model, w, alpha)`, append `"\n\nFinal answer: **"`, score `margin = logp_yes - logp_no` and `pmass = P(yes) + P(no)` at the next position. Per AntiPaSTO `docs/AntiPaSTO_concepts/README.md:467-477`: pmass≈1.0 in linear range, drops outside. **Built**, not yet run.
-
-Run with `just demo`.
-
-## Phase B — Convergence/overfit (only if A flags issue)
-
-Patched `train.py` adds 10% val split + `eval_strategy="steps", eval_steps=10`.
-Re-queue with 3 epochs:
-
-```
-pueue add -l "why: did task 40 LoRA converge or undertrain; resolve: val_loss curve flattens (converge), keeps dropping (undertrain), or U-curves (overfit)" -- uv run python -m ws.replicate --model Qwen/Qwen3-0.6B --behavior sycophancy --adapter lora --n-pairs 1000 --epochs 3
-```
-
-Reuses task 40's data on disk. ~6 min total.
-
-## Phase 2 reframe — why activation-blind SVD-of-W was the wrong test
-
-Task 40 measured energy of `w_layer` in the top-k×k corner of base SVD(W). Across 7 module kinds, all `ratio_top ≈ 1.0 ± 0.10` (per-layer std). I initially called this "SVD-alignment falsified."
-
-That's the wrong reading. From `docs/AntiPaSTO_concepts/docs/steering_methods.qmd:340-343` (Common Misconceptions #3, "SVD(W) aligns with PCA(diffs)"):
-
-> Wrong: Weight's principal directions should align with task-relevant activation differences.
-> Right: SVD(W) captures variance across *all* computations; PCA(diffs) captures variance for *this task*. We measured ~0.08 cosine similarity — essentially orthogonal.
-
-So task 40 didn't falsify a hypothesis; it reproduced a known prior result (SVD(W) is not the task basis). The Fisher table at `steering_methods.qmd:207-214` says the same thing differently:
-
-| Subspace | Peak Fisher |
-|---|---|
-| weight_svd / write_minus_lm_head | 0.007–0.009 (Level 0) |
-| task_diff / suppressed | 0.013–0.022 (Level 1) |
-| **stenographic** (task ∩ suppressed) | **0.142** (Level 2) |
-| task ∩ stenographic | 0.266 (Level 3) |
-
-The *right* test is what wassname intuited: project task hidden states (or their differences) onto a basis, then test if `w` aligns with that. Three concrete activation-aware tests to add (replacing the Haar-null SVD-of-W test):
-
-1. **TaskDiff alignment**: collect `h_pos[L]` and `h_neg[L]` on a probe set (using base model under +/- system prompts on training topics). PCA on `h_pos - h_neg`, top-k. Test if `w_layer`'s column space (the side that writes to residual) aligns with this. Null = random rank-r perturbation.
-2. **Suppressed alignment**: per `steering_methods.qmd:67-110`, compute `min(Σrelu(Δmag+), Σrelu(Δmag-))` across layers, PCA. Suppressed has 3.5× enrichment for task signal vs random (`steering_methods.qmd:407-414`). Test `w` against this.
-3. **Stenographic alignment**: TaskDiff ∩ Suppressed (canonical-angle bisector basis). Highest Fisher (0.142) per AntiPaSTO. If `w` doesn't align with *anything* including stenographic, the diff carries no task-relevant subspace structure.
-
-The existing weak-readout test (`subspace.py:weak_readout_alignment`) is in spirit Logits_Null (`steering_methods.qmd:81`) — keep it.
-
-Cleanup needed in `subspace.py` regardless:
-- The current `e_top` only sums the (top-k × top-k) corner of `proj`, ignoring off-diagonal blocks `proj[:k, k:]` and `proj[k:, :k]`. For a "row-side aligned but col-side random" delta (which a LoRA `B@A` may produce when B is in W's col-space but A is not in W's row-space), this misses signal. Either measure all four blocks or restate the hypothesis.
-- The reported ±0.10 was per-layer std over n=28 layers, not SE of the per-kind mean. Re-doing as SE: down_proj +2.2σ, v_proj −1.7σ from null. Bonferroni across 7 kinds kills these, but it's not "1.0 ± 0.1 across all kinds" — there is per-kind variation.
-
-## Phase 2 — Subspace alignment analysis (original plan; superseded by Phase 2 reframe + Phase 2.5)
-
-For each layer's weight matrix W and its diff `w_layer`:
-
-1. SVD of pretrained W → `U_out, S, U_in.T`.
-2. Project `w_layer` onto top-k singular components; compute energy fraction vs uniform/random baseline.
-3. Repeat for the four AntiPaSTO subspaces:
-   - **Suppressed** (PCA of layer-to-layer magnitude drops on a probe set)
-   - **Write-not-read** (orth complement of next layer's read span)
-   - **Weak-readout** (bottom-1% Vh of unembedding)
-   - **Stenographic** (intersection of task-diff and suppressed)
-4. Output: a polars table per subspace with `{layer, energy_in_subspace, energy_random_baseline, ratio}`. Print with tabulate.
-
-Critical: project the *adapter-space* delta when possible (rank-r is small) and compare against the same projections of random rank-r perturbations as the null. This makes the alignment claim falsifiable.
-
-## Phase 3 — Adapter sweep (the actual science)
-
-For each adapter type, train +/- and produce a weight-space diff:
-
-| Adapter | PEFT support | Hypothesis being tested |
-|---|---|---|
-| LoRA r=16 | built-in | baseline: low-rank suffices |
-| DoRA r=16 | built-in (`use_dora=True`) | magnitude/direction split keeps diff cleaner |
-| LoRA + PiSSA init | `init_lora_weights="pissa"` (built-in init mode) | principal components carry the steering signal |
-| DeLoRA r=16 | built-in (peft >= 0.13) | strength/direction decoupling improves robustness |
-
-Per adapter, log: train loss curves, time, peak mem, then phase-1 sweep + phase-2 alignment table. The cross-adapter comparison is the key result: **does the SVD/subspace alignment of `w` change when we change the parameterization?** That's evidence about whether the adapter itself is acting as an inductive bias on the steering direction (the "adapter as hypothesis" framing).
-
-Scope guard: drop SSVD; user already excluded it. If DeLoRA blows up in PEFT, fall back to LoRA + PiSSA + DoRA.
-
-## Phase 4 — Daily-dilemmas eval (CPU-feasible at 0.6B)
-
-Build `src/ws/eval/dilemmas.py` mirroring `AntiPaSTO2/antipasto2/eval.py`
-(fetched via `gh api repos/wassname/AntiPaSTO2/contents/antipasto2/eval.py`).
-Reuse our existing primitives — don't re-implement choice scoring.
-
-Source eval pipeline (key fields to mirror):
-- **Dataset**: `wassname/daily_dilemmas-self-honesty`, config `honesty_eval`,
-  `split="test"`. Take top-N by `dilemma_idx` (default 100). Each row has
-  `dilemma_idx`, `idx`, `action_type`, `honesty_label` (+1/-1).
-- **Prompt**: `INSTRUCTION_PROMPT.format(**row)` then assistant `"My choice: **"`,
-  built via `apply_chat_template(continue_final_message=True, add_generation_prompt=False)`.
-  *Vendor `INSTRUCTION_PROMPT` from AntiPaSTO2/antipasto2/data.py.*
-- **Score**: yes/no logratio at last position (same as our `sycophancy.py`).
-  Reuse `ws/eval/sycophancy.py:get_choice_ids` — already identical to v2.
-- **Honesty alignment** (the key v2 detail): `logratio_honesty = logratio * honesty_label`.
-  Positive = more honest. Aggregate this, not raw logratio — sign cancels otherwise.
-- **Coeff sweep**: `[-1.0, 0.0, 1.0]` (default; can override).
-- **Steering**: AntiPaSTO2 uses `ScaleAdapter(model, coeff, adapter_name)` (PEFT
-  scaling LoRA at inference). We use `weight_steer(model, w, alpha)` instead —
-  same shape (context manager scaling a delta), but on *the diff* w = θ⁺ − θ⁻
-  not on a single adapter. Drop-in.
-- **pmass flag**: `low_pmass = pmass < threshold * maxp` (threshold=0.01).
-  Don't filter — flag for analysis. Compare to our guided-CoT `pmass≈1.0` baseline.
-
-Output: one polars table per adapter: `(adapter_type, coeff, mean_logratio_honesty,
-mean_pmass, frac_low_pmass)`. Save per-row CSV for later regression on
-`action_type`.
-
-Wire as `ws/eval/dilemmas.py` + `evaluate()` entrypoint in `replicate.py`
-(after sycophancy eval). `just eval-dilemmas adapter=lora` recipe.
-
-## Phase 5 — Generalization + degradation (later, rented GPU)
-
-Defer until phases 1-4 produce a clear winner. Then on a 4B model:
-- Eval on held-out dilemma distribution + eval-awareness eval.
-- Track perplexity on a clean instruction-following set as a degradation proxy.
-
-## Critical files to modify / reference
-
-- **Modify heavily:** `task_vectors.py`, `activation_steering.py`
-- **Delete:** `vllm_inference.py`, `api_inference.py`, `axolotl_plugin_models_with_mlp_bias.py`, `models_with_mlp_bias.py`, `inference_and_eval.py`, `axolotl_configs/`
-- **Reference (read-only):** `docs/weight_steering_paper.md` (Appendix B/E hyperparams), `docs/AntiPaSTO_concepts/README.md` (subspace definitions), `docs/blog_adapter_as_hypothesis/README.md` (adapter scoring)
-- **Mirror:** AntiPaSTO2 `antipasto2/eval.py` (eval pattern, choice-id extraction, ScaleAdapter context manager)
-
-## Reuse, don't reinvent
-
-- `peft.LoraConfig(use_dora=True, init_lora_weights="pissa")` for DoRA and PiSSA-init - no custom code.
-- `peft.DeloraConfig` for DeLoRA (peft >= 0.13).
-- `baukit.TraceDict` for steering hooks (per user CLAUDE.md).
-- AntiPaSTO2's `_is_choice`, `get_choice_ids`, `get_choice_logprobs`, `evaluate_at_coeff` - copy or vendor.
-- `loguru` + `tabulate(df, tablefmt='pipe', headers='keys', floatfmt='+.2f')` for log output.
-
-## Verification
-
-End-to-end checks the user can read at a glance:
-
-1. **Phase 0 done when:** `just smoke` runs in <5 min on Qwen3-0.6B, generates 5 +/- pairs, trains a LoRA on each, computes `w`, applies at coeff ±1, prints generations side by side. Single command, no Axolotl, no vLLM.
-2. **Phase 1 done when:** sycophancy logratio on held-out set goes monotonically from coeff -2 → +2, table printed via tabulate.
-3. **Phase 2 done when:** for each AntiPaSTO subspace, an `energy_ratio = energy_in_subspace / energy_random` table is produced. Ratio > 1 with bootstrap CI not crossing 1 = real alignment.
-4. **Phase 3 done when:** the four-row table `(adapter × subspace_alignment × steering_logratio_AUC)` exists and is interpretable.
-5. **Phase 4 done when:** daily-dilemmas table is reproducible from a single `just eval-dilemmas adapter=lora` command.
-
-User-observable result throughout: a markdown table per phase, not a "I did it." Each table answers one question.
-
-## Open questions to resolve during implementation (not blockers)
-
-- Sycophancy data: regenerate using Qwen3-0.6B as the +/- responder, or use the paper's released data if available? (Default: regenerate with Qwen3-0.6B since 0.6B's distribution differs from 7B's.)
-- Layer selection for the diff: paper does per-layer sweeps (Appendix E). For phase 1 just take all layers; for phase 3, sweep.
-- Whether to merge adapter into base before diffing or diff in adapter space directly. Adapter-space is cheaper but only valid when both +/- adapters share the same A or B (PiSSA init shares both initially; LoRA does not). Default: merge into delta-W space, then diff. This makes all adapters comparable.
-
-# 2026-04-27 09:54:33
-
-Yes. These are **parameterization / factorization tests** of `dW`.
-
-Minimal plan:
-
-1. **Baseline**
-   - base model
-   - prompt baseline
-   - activation steering baseline
-   - full `dW`
-
-2. **Layer ablation**
-   - keep only layer `L`’s `dW`
-   - or remove layer `L` from full `dW`
-   - tells where steering is causally located by layer
-
-3. **SVD split of `dW`**
-   - per tensor: `dW = U S Vᵀ`
-   - test top-k vs tail:
-     - `top8`
-     - `top32`
-     - `tail`
-   - tells whether steering is low-rank or distributed
-
-4. **Read/write subspace projections**
-   - project `dW` into:
-     - write space
-     - write-not-read
-     - super read: `[q,k,v,up,gate]`
-     - super write: `[o,down]`
-   - test projected part vs complement
-
-5. **Magnitude vs angle / rotation**
-   - yes, this is a parameterization test.
-   - split weight change into:
-     - norm/magnitude change
-     - direction/rotation change
-   - especially relevant for `DeLoRA`, `DoRA`, `OFT`.
-
-Do this for **Qwen + Gemma**, but first on Qwen only to debug.
-
-DD coverage note: current default DD eval is **not full split**. It uses the
-first 100 dilemmas = 200 rows, balanced 100 honest-label and 100 dishonest-label
-actions, then sign-flips by `honesty_label`. Full `honesty_eval` test is 219
-dilemmas = 438 rows. So current tables are all rows for the selected dilemmas,
-not only honest rows, and not the full split unless `--n-dilemmas 219`.
-
-Adapter replication note: we've done the adapter sweep on Qwen3-0.6B. For Gemma
-1B, do a small replication first: LoRA / PiSSA / DeLoRA, seed 0, full DD split,
-then only add more seeds/adapters if the ranking differs or DeLoRA stays best.
-
-Core table should be:
-
-| intervention | kept params | DD effect | syc effect | retention vs full |
-|---|---:|---:|---:|---:|
-
-If top-k or write-not-read keeps effect, we found a simple steering parameterization.  
-If only many layers/tail/complement keeps effect, it’s distributed.
+This is a fork of Anthropic's weight-steering method. Original recipe: train one positive adapter and one negative adapter, merge each adapter into base-weight deltas, then steer with:
+
+$$dW = \Delta W_{pos} - \Delta W_{neg}.$$
+
+This repo removes Axolotl/vLLM/API orchestration and rebuilds the method in HF + PEFT + uv for cheap iteration on small models.
+
+Current main model: `Qwen/Qwen3-0.6B`.
+
+Current behavior: sycophancy training, evaluated on sycophancy Yes/No and `wassname/daily_dilemmas-self-honesty`.
+
+## Links
+
+- Paper / blog:
+  - [docs/weight_steering_paper.md](docs/weight_steering_paper.md)
+  - [docs/weight_steer_blog.md](docs/weight_steer_blog.md)
+- Adapter-as-hypothesis notes:
+  - [docs/blog_adapter_as_hypothesis/README.md](docs/blog_adapter_as_hypothesis/README.md)
+- Steering/subspace concepts:
+  - [docs/AntiPaSTO_concepts/README.md](docs/AntiPaSTO_concepts/README.md)
+- Current user-facing summaries:
+  - [README.md](README.md)
+  - [RESEARCH_JOURNAL.md](RESEARCH_JOURNAL.md)
+- Key code:
+  - [src/ws/data.py](src/ws/data.py)
+  - [src/ws/train.py](src/ws/train.py)
+  - [src/ws/diff.py](src/ws/diff.py)
+  - [src/ws/steer.py](src/ws/steer.py)
+  - [src/ws/eval/sycophancy.py](src/ws/eval/sycophancy.py)
+  - [src/ws/eval/dilemmas.py](src/ws/eval/dilemmas.py)
+  - [nbs/cross_adapter_v9.py](nbs/cross_adapter_v9.py)
+  - [nbs/functional_projection_v10.py](nbs/functional_projection_v10.py)
+
+## Current facts
+
+- Daily-dilemmas default is **not full split**. Default `n_dilemmas=100` means first 100 dilemmas = 200 rows, balanced 100 honest-label and 100 dishonest-label actions.
+- Full `honesty_eval` test split is 219 dilemmas = 438 rows.
+- The daily-dilemmas eval uses all rows for selected dilemmas, then sign-flips by `honesty_label`; it is not only honest rows.
+- Current headline tables are single-seed Qwen3-0.6B exploratory results.
+- DeLoRA is best raw steering so far. PiSSA is the cleaner stable baseline if penalizing DeLoRA saturation at high alpha.
+- v9/v10 do **not** prove “no subspace.” They show the trained behavior is not explained by the tested low-rank residual-stream bases or adapter-family parameterization at trained scale.
+- The highest-value analysis test is cross-adapter causal ablation: if LoRA / DoRA / PiSSA / DeLoRA / OFT share a causal low-rank `dW` core, that is the clean planning-subspace result; if not, it is the cleanest negative result for the shared-subspace hypothesis.
+
+## Done
+
+- [x] Clean repo into uv + HF + PEFT small-model workflow.
+- [x] Make Qwen3-0.6B sycophancy steering work end-to-end.
+- [x] Hook in LoRA, DoRA, PiSSA, DeLoRA, OFT, and IA3 adapter families.
+- [x] Build sycophancy logratio eval with coefficient sweep.
+- [x] Build daily-dilemmas honesty eval with sign-flipped Yes/No logratio.
+- [x] Run single-seed Qwen adapter benchmark on sycophancy and 100-dilemma DD default.
+- [x] Fix DD cross-adapter aggregation to use base-only coeff=0 rather than mixing persona baselines.
+- [x] Run v9 subspace/scope diagnostics: weight oracle, cumulative activation oracle, block-local activation oracle, first-LoRA-layer sanity checks.
+- [x] Run v10 projection/complement falsifier: raw activation projection, complement, and normmatched projection.
+- [x] Update README and research journal with corrected DD table and conservative interpretation.
+
+## TODO: benchmark question
+
+- [ ] **Goal: activation-steering baseline on the same DD rows.**
+  - Why: RepE/repeng is the most threatening baseline; if it matches or beats `dW`, the method story weakens before adapter seeds matter.
+  - Do: train representation direction on the same sycophancy contrast; grid layer x coefficient; evaluate sycophancy and full DD.
+  - UAT: best activation-steering row is selected by held-out sycophancy or validation DD, then reported beside best `dW` on identical DD test rows.
+  - Verify: table includes `method=repeng`, `layer`, `coeff`, `syc_delta`, `dd_delta`, `pmass`, and the same `idx` set as the `dW` rows.
+  - Negative outcome -> claim: if repeng matches/beats `dW`, write "activation steering is the simpler baseline; weight steering needs a stronger reason to exist."
+
+- [ ] **Goal: full daily-dilemmas benchmark for current Qwen adapters.**
+  - Why: current DD table uses first 100 dilemmas, not the full 219-dilemma split.
+  - Do: re-run LoRA / PiSSA / DeLoRA / DoRA / OFT / IA3 with `--n-dilemmas 219`.
+  - UAT: table has 438 base rows per coeff before persona baselines, and reports `pmass`, `frac_low_pmass`, `delta(+1 - 0)`.
+  - Verify: `out/sycophancy/cross_adapter_full_dd/dilemmas_summary.csv` exists and includes `n_base_rows_per_coeff=438`.
+
+- [ ] **Goal: prompt baselines on the same DD rows.**
+  - Why: weight steering is only interesting if it beats “just prompt it.”
+  - Do: evaluate base, simple honest persona, and engineered AxBench-style prompt.
+  - UAT: one table compares `base`, `simple_honest_prompt`, `engineered_prompt`, and best `dW` on identical rows.
+  - Verify: `prompt_baseline_delta` and `weight_steer_delta` are computed from the same `idx` set.
+  - Negative outcome -> claim: if prompting matches/beats `dW`, write "prompting is the simpler intervention for this behavior/eval pair."
+
+- [ ] **Goal: multi-seed adapter benchmark on Qwen.**
+  - Why: current adapter ranking is N=1 seed.
+  - Do: run seeds 0, 1, 2 for LoRA / PiSSA / DeLoRA first; add DoRA/OFT only if cheap.
+  - UAT: table reports mean +/- std for sycophancy and DD deltas, plus seed-level signs, so a reader can tell stable ranking from noisy N=1 luck.
+  - Verify: each adapter has exactly three `w.pt` files and three eval summaries; ranking table includes `n_seeds=3`, `mean_dd_delta`, `std_dd_delta`, and `sign_agreement`.
+  - Negative outcome -> claim: if adapter ranking changes across seeds or error bars overlap heavily, write "single-seed adapter winner is unstable; do not claim a family ranking yet."
+
+- [ ] **Goal: Gemma 1B replication.**
+  - Why: check whether DeLoRA/PiSSA ranking is Qwen-specific.
+  - Do: train LoRA / PiSSA / DeLoRA on Gemma 1B, seed 0, full DD split.
+  - UAT: compare Gemma ranking to Qwen ranking with the same metrics.
+  - Verify: table has model column with `Qwen3-0.6B` and `Gemma-1B`; if DeLoRA remains best, expand seeds; if rankings diverge, write that up as a model-specific adapter-basin finding.
+
+## TODO: analysis question
+
+- [ ] **Goal: cross-adapter causal-ablation table for `dW` bases.**
+  - Why: this is the headline analysis experiment. It tests whether different adapter families discovered the same causal planning subspace or different basins.
+  - Do: one notebook builds candidate bases `B`, computes `dW_keep_B` and `dW_drop_B`, and evaluates both on sycophancy + full DD for each adapter. This single table replaces separate layer-ablation, SVD top/tail, read/write, MLP, and magnitude/direction experiments.
+  - Candidate `B` rows:
+    - `shared_SVD_K8/K32/K64`: stack residual-output `dW` from LoRA / DoRA / PiSSA / DeLoRA / OFT per layer/tensor, take top-K SVs.
+    - `top8/top32_per_adapter` and `tail_per_adapter`: per-adapter SVD split of each tensor.
+    - `write`, `write_not_read`, `super_read [q,k,v,up,gate]`, `super_write [o,down]`.
+    - `mlp_down`, `mlp_up`, `mlp_gate`, `mlp_up+gate`, `attn_only`.
+    - `magnitude`, `direction/rotation` for DeLoRA / DoRA / OFT where mathematically defined.
+    - `layers_8..21_only`, leave-one-layer-out, and `random_null`.
+  - UAT: one central table has every ablation family as rows, with columns `ablation_family`, `candidate_B`, `adapter`, `rank`, `retain_keep`, `retain_drop`, `syc_delta_keep`, `dd_delta_keep`, `syc_delta_drop`, `dd_delta_drop`, `pmass`.
+  - Verify: the single table contains keep/drop rows for every `ablation_family`: `shared_svd`, `per_adapter_svd`, `read_write`, `mlp_first_order`, `magnitude_direction`, `layer`, and `random_null`; `layer` includes both `layers_8..21_only` and leave-one-layer-out rows; `keep_B_shared_K32` and `drop_B_shared_K32` are both evaluated for at least LoRA / DoRA / PiSSA / DeLoRA / OFT; random null retention is near rank/d; each row uses the same eval rows and coefficient grid.
+  - Positive outcome -> claim: if `keep_B_shared` retains >=0.7x behavior across adapters and `drop_B_shared` removes it, write the adapter-invariant planning-subspace paper.
+  - Negative outcome -> claim: if `keep_B_shared` retains <0.3x even at K=64 while complements/tails retain behavior, write the shared-subspace negative result: steering is distributed or lives in the wrong parameter space for these bases.
+  - Ambiguous outcome -> claim: if both keep and drop retain high behavior, report non-identifiability under this basis family and move to stricter causal interventions, not a positive subspace claim.
+
+- [ ] **Goal: from-scratch parameterization steering.**
+  - Why: decomposing trained `dW` is weaker than constructing a steering delta from base weights/activations alone.
+  - Do: build simple `dW_prime = f(W_base, persona_contrast)` candidates, e.g. lm-head/readout rowspace projected persona contrast, write-not-read persona contrast, and shared structural bases with signed coefficients from activation contrast.
+  - UAT: table compares `dW_prime` to trained `dW`, prompt, and repeng on identical sycophancy + DD rows.
+  - Verify: candidates are generated without reading trained adapter deltas; code fails if `w.pt` is loaded before constructing `dW_prime`.
+  - Positive outcome -> claim: if a from-scratch `dW_prime` steers, weight steering may be replaced by a constructive parameterization.
+  - Negative outcome -> claim: if no from-scratch candidate steers while trained `dW` does, training is doing nontrivial search not captured by the current structural recipes.
+
+## Deferred / optional
+
+- [ ] **Goal: SVD steering baseline.**
+  - Why: useful only if cheap and stable; lower priority than repeng.
+  - UAT: same DD/sycophancy table as other baselines.
+  - Verify: table includes `method=svd_steering`, `layer`, `rank`, `coeff`, `syc_delta`, `dd_delta`, and `pmass`.
+  - Negative outcome -> claim: if SVD steering is weak or unstable, do not treat plain base-weight SVD as a competitive method baseline.
+
+- [ ] **Goal: degradation benchmark.**
+  - Why: steering might improve target metric while damaging general behavior.
+  - UAT: perplexity or clean instruction proxy reported for best coefficients.
+  - Verify: table has target metric and degradation metric for the exact same selected coefficients.
+  - Negative outcome -> claim: if target gains require large degradation, report steering as brittle rather than useful.
+
+- [ ] **Goal: larger model replication.**
+  - Why: Qwen3-0.6B and Gemma 1B are iteration models; larger model needed for a stronger claim.
+  - UAT: same benchmark table on a 4B-ish model after method stabilizes.
+  - Verify: model column includes the 4B-ish model and reuses the same prompt/DD row IDs as the small-model benchmark.
+  - Negative outcome -> claim: if the effect disappears or reverses on the larger model, write the small-model limitation instead of scaling the claim.
+
+## Decision rules
+
+- If prompt or activation steering beats `dW`, prioritize method improvement before deeper mechanistic analysis.
+- If activation steering matches `dW`, treat weight steering as mechanistic interest first and applied method second.
+- If DeLoRA wins across Qwen and Gemma, spend seeds on DeLoRA/PiSSA only.
+- If Qwen and Gemma adapter rankings diverge, write the model-specific adapter-basin finding instead of forcing one global winner.
+- Shared-core rule: if `keep_B_shared_K32` retains >=0.7x behavior across LoRA / DoRA / PiSSA / DeLoRA / OFT and `drop_B_shared_K32` removes most of it, write the planning-subspace paper.
+- Basin-divergence rule: if per-adapter top subspaces are mutually low-overlap and each adapter's own SVD keeps behavior better than `B_shared`, write the basin-divergence paper.
+- If top-k or write-not-read keeps behavior, we found a simple steering parameterization.
+- If complement/tail/many layers keep behavior, evidence favors distributed or wrong-space mechanism.
+- If MLP `up/gate` terms carry behavior, next paper story should be feature-space steering, not residual-stream planning subspace.
