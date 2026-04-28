@@ -3,25 +3,31 @@
 Why: comparing methods at α=1 is unfair — α=1 means very different things across
 LoRA / PiSSA / DeLoRA / OFT / IA3 / RepE / prompt. The principled budget is the
 KL footprint of a strong prompt baseline (here: engineered_prompt_honest). For
-each method, Newton-search α so that p95 per-token KL(steered ‖ base) over 20
-continuation positions matches the prompt's p95 KL.
+each method, Newton-search α so that p95 per-token KL(steered ‖ base) over the
+greedy-generated trajectory matches the prompt's p95 KL.
 
-Pipeline:
-  1. Build 4 diverse calibration prompts (code/dialogue/encyclopedia/reasoning).
-  2. Forward base model on each → base log-probs at last 20 positions.
-  3. Forward steered (sys-prompt-engineered) → measure p95 KL = T (the budget).
-  4. For each of {6 adapters, RepE}:
-       α ← 1.0 (initial)
-       for k in range(n_iters):
-         M ← p95 KL(steered_at_α ‖ base) over 4 prompts × 20 tokens
-         if M ≈ T: break
-         α ← α · sqrt(T / M)            # 1-step Newton for KL ~ α²·F
-  5. Audit: at calibrated α per method, recompute p95 on 150 held-out prompts.
+Methodology (matches the gist
+https://gist.github.com/wassname/6c11cf30b43d8c228bc114795f1019c7):
 
-KL direction: KL(steered ‖ base) — mode-seeking, captures where steered puts
-mass base wouldn't. Standard RL/policy choice. Single-seed: methods are
-deterministic; "noise" comes only from prompt sampling, so 4×20 = 80 token
-positions is the MC budget for p95.
+  For each prompt:
+    1. Greedy-generate `n_tokens` continuation tokens under the *steered* model.
+       This gives the trajectory the steered policy actually walks, plus the
+       per-step steered log-probs from generate(output_scores=True).
+    2. Append those generated tokens to the *base* prompt (no system prompt,
+       no steering) and teacher-force one forward to score them under base.
+    3. Per-position KL(steered ‖ base) = Σ p_s · (logp_s − logp_b) along
+       the steered trajectory.
+
+  This is mode-seeking KL on the *generated* path — captures cumulative drift
+  that fixed-continuation KL misses. p95 over (prompts × positions) is the
+  "no-spike" stat we calibrate against.
+
+Search: exponential bracket on α, then Illinois regula-falsi in log-(α, p95).
+Plain bisection is linear; stat(α) is roughly p95 ~ α^k near root, which is
+linear in (log α, log p95), so log-space false-position usually converges in
+3-4 iters. Illinois rule (halve the stuck side's f when same bracket end is
+kept twice in a row) breaks the stuck-endpoint failure mode of pure regula
+falsi. Generalises the gist's bisection — same bracket, faster inner loop.
 """
 
 from __future__ import annotations
@@ -33,7 +39,6 @@ import numpy as np
 import polars as pl
 import torch
 import tyro
-from baukit import TraceDict
 from loguru import logger
 from tabulate import tabulate
 from torch import Tensor
@@ -42,13 +47,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ws._log import final_summary, get_argv, setup_logging
 from ws.data import _load_suffixes
 from ws.diff import DIFF_FILENAME, load_diff
-from ws.eval.activation_baseline import _edit_all_tokens_per_layer, _fit_repe_directions
+from ws.eval._steer_common import (
+    build_chat_ids,
+    build_chat_text,
+    greedy_generate_under_steering,
+    log_sample_prompt,
+    teacher_force_logp,
+)
+from ws.eval.activation_baseline import _fit_repe_directions
 from ws.eval.prompt_baseline import PROMPTS as PROMPT_TEXTS
-from ws.steer import weight_steer
 
-# Diverse calibration: stratified by category. Prompts perturb conditionally
-# on topic, so n=4 underestimates p95 wildly. n=50 across all cats gives stable
-# p95 (audit on 100 disjoint prompts validated this empirically).
 CALIB_CATS = (
     "code", "dialogue", "encyclopedia", "reasoning",
     "ethics", "fact", "stories", "general", "email", "tech",
@@ -66,10 +74,18 @@ class KLCalibrateCfg:
     n_audit_prompts: int = 100
     n_tokens: int = 20
     target_pct: float = 95.0
-    target_prompt: str = "engineered_prompt_honest"
-    alpha_init: float = 1.0
-    n_newton_iters: int = 4
-    convergence_band: float = 0.20  # stop if |M-T|/T < band
+    # "Side of the road" = 1 nat per-token KL (gist):
+    # https://gist.github.com/wassname/6c11cf30b43d8c228bc114795f1019c7
+    # Newton residual is 1 − p95(KL); we search a global coefficient C such
+    # that p95 KL = target_kl at α=1.
+    target_kl: float = 1.0
+    target_prompt: str = "engineered_prompt_honest"  # logged as a reference, not the target
+    # Bracket guard (lo, hi) on the global coefficient. KL ~ α²·F near root, so
+    # below ~0.05 nothing happens; above ~16 we'd be deep in collapse-land.
+    bracket_lo: float = 0.05
+    bracket_hi: float = 16.0
+    n_root_iters: int = 12  # Illinois inner loop; usually converges in 3-5
+    convergence_tol: float = 0.05  # |p95 - target| < tol (absolute, in nats)
     repe_layers: tuple[int, ...] = field(default_factory=lambda: tuple(range(8, 22)))
     n_repe_train: int = 20
     seed: int = 0
@@ -113,83 +129,79 @@ def _select_prompts(n_calib: int, n_audit: int, seed: int) -> tuple[list[dict], 
     return calib, audit
 
 
-def _build_input_ids(tok, system: str, user: str, assistant_prefix: str,
-                     n_tokens: int, max_total: int = 256) -> Tensor:
-    """Tokenize chat: [sys?, user, assistant=prefix]. Truncate prefix from the end
-    so suffix tail (the next-token prediction targets) survives."""
-    msgs = []
-    if system:
-        msgs.append({"role": "system", "content": system})
-    msgs.append({"role": "user", "content": user})
-    msgs.append({"role": "assistant", "content": assistant_prefix})
-    text = tok.apply_chat_template(
-        msgs, tokenize=False,
-        continue_final_message=True, add_generation_prompt=False,
-    )
-    enc = tok(text, return_tensors="pt", truncation=True, max_length=max_total)
-    ids = enc.input_ids.squeeze(0)
-    # Need at least n_tokens+2 to take logits at [-n_tokens-1:-1]
-    if ids.shape[0] < n_tokens + 2:
-        raise ValueError(f"input too short ({ids.shape[0]}) for n_tokens={n_tokens}")
-    return ids
+def _system_prompts_for(method: str) -> tuple[str, str]:
+    """Return (sys_for_steered_pass, sys_for_base_pass).
 
-
-@torch.no_grad()
-def _forward_logp(model, input_ids: Tensor, n_tokens: int) -> Tensor:
-    """Returns log-softmax at last n_tokens positions of next-token preds → [n_tokens, V]."""
-    out = model(input_ids=input_ids.unsqueeze(0).to(model.device))
-    logits = out.logits[0, -n_tokens - 1:-1]  # predicts last n_tokens of input_ids
-    return logits.float().log_softmax(-1).cpu()
-
-
-def _kl_per_token(logp_steered: Tensor, logp_base: Tensor) -> Tensor:
-    """KL(p_steered ‖ p_base) per position. Both [T, V] log-prob tensors."""
-    p = logp_steered.exp()
-    return (p * (logp_steered - logp_base)).sum(-1)  # [T]
-
-
-@torch.no_grad()
-def _measure_kl(method: str, alpha: float, *, model, tok, prompts, n_tokens,
-                w=None, repe_dirs=None, repe_layers=None) -> dict:
-    """Return per-token KL stats for given method+α across all prompts."""
-    # Build base inputs (no system prompt).
-    base_ids_list = [
-        _build_input_ids(tok, "", p["user_msg"], p["suffix"], n_tokens)
-        for p in prompts
-    ]
-
-    # Base log-probs (vanilla model, no steering, no sys prompt).
-    base_logps = [_forward_logp(model, ids, n_tokens) for ids in base_ids_list]
-
-    # Build steered inputs and forward under steering.
-    steered_logps: list[Tensor] = []
+    For prompt: methods, the "steering" is the system prompt; base has none.
+    For dW / repe / base, both passes use the same (empty) system prompt and
+    steering is applied at runtime.
+    """
     if method.startswith("prompt:"):
-        sys_prompt = PROMPT_TEXTS[method.split(":", 1)[1]]
-        steered_ids_list = [
-            _build_input_ids(tok, sys_prompt, p["user_msg"], p["suffix"], n_tokens)
-            for p in prompts
-        ]
-        for ids in steered_ids_list:
-            steered_logps.append(_forward_logp(model, ids, n_tokens))
-    elif method.startswith("dW:"):
-        with weight_steer(model, w, alpha):
-            for ids in base_ids_list:
-                steered_logps.append(_forward_logp(model, ids, n_tokens))
-    elif method == "repe":
-        hooks = [f"model.layers.{L}" for L in repe_layers]
-        layer_list = list(repe_layers)
-        edit = _edit_all_tokens_per_layer(repe_dirs, layer_list, alpha)
-        for ids in base_ids_list:
-            with TraceDict(model, hooks, edit_output=edit):
-                out = model(input_ids=ids.unsqueeze(0).to(model.device))
-            logits = out.logits[0, -n_tokens - 1:-1]
-            steered_logps.append(logits.float().log_softmax(-1).cpu())
-    else:
-        raise ValueError(f"unknown method: {method}")
+        return PROMPT_TEXTS[method.split(":", 1)[1]], ""
+    return "", ""
 
-    # Per-token KL across all (prompt, position) pairs.
-    kls = torch.cat([_kl_per_token(s, b) for s, b in zip(steered_logps, base_logps)])
-    arr = kls.numpy()
+
+@torch.no_grad()
+def _measure_kl_along_trajectory(
+    method: str, alpha: float, *, model, tok, prompts, n_tokens,
+    w=None, repe_dirs=None, repe_layers=None,
+    log_first_sample: bool = False, sample_label: str = "",
+) -> dict:
+    """KL(steered ‖ base) per token along the steered greedy trajectory.
+
+    For each prompt:
+      1. Build steered_ids (with sys prompt if method=prompt:).
+      2. Greedy-generate n_tokens under steering -> (gen_ids, logp_steered[T,V]).
+      3. Build base_ids (no sys prompt) + gen_ids; teacher-force base -> logp_base[T,V].
+      4. KL_t = Σ_v p_steered_t(v) · (logp_steered_t(v) − logp_base_t(v)).
+    """
+    sys_steered, sys_base = _system_prompts_for(method)
+
+    all_kls: list[Tensor] = []
+    for i, p in enumerate(prompts):
+        # thinking=True: assistant turn ends in open `<think>\n` so the 20
+        # greedy tokens are reasoning, not answer continuation. The suffix
+        # field is unused here — the gist's protocol is "20 thinking tokens
+        # under steering on a question prompt", not "complete this answer".
+        steered_input_ids = build_chat_ids(
+            tok, sys_steered, p["user_msg"], "", thinking=True,
+        )
+        if sys_steered == sys_base:
+            base_input_ids = steered_input_ids
+        else:
+            base_input_ids = build_chat_ids(
+                tok, sys_base, p["user_msg"], "", thinking=True,
+            )
+
+        gen_ids, logp_steered = greedy_generate_under_steering(
+            model, tok, steered_input_ids,
+            method=method, alpha=alpha, n_new_tokens=n_tokens,
+            w=w, repe_dirs=repe_dirs, repe_layers=repe_layers,
+        )
+        T = gen_ids.shape[0]
+        if T == 0:
+            continue
+
+        full_base_ids = torch.cat([base_input_ids, gen_ids])
+        logp_base = teacher_force_logp(model, full_base_ids, T)
+
+        p_s = logp_steered.exp()
+        kl = (p_s * (logp_steered - logp_base)).sum(-1)  # [T]
+        all_kls.append(kl)
+
+        if log_first_sample and i == 0:
+            text = build_chat_text(tok, sys_steered, p["user_msg"], "", thinking=True)
+            label = sample_label or f"calib method={method} α={alpha:+.3f}"
+            log_sample_prompt(tok, text, generated_ids=gen_ids, label=label)
+            logger.info(
+                f"[{label}] kl per pos: {[f'{k:.3f}' for k in kl.tolist()]} "
+                f"sum={float(kl.sum()):.3f} max={float(kl.max()):.3f}"
+            )
+
+    if not all_kls:
+        return {"mean": 0.0, "p50": 0.0, "p95": 0.0, "p99": 0.0, "max": 0.0, "n": 0}
+
+    arr = torch.cat(all_kls).numpy()
     return {
         "mean": float(arr.mean()),
         "p50": float(np.percentile(arr, 50)),
@@ -200,33 +212,123 @@ def _measure_kl(method: str, alpha: float, *, model, tok, prompts, n_tokens,
     }
 
 
-def _newton_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
-                      w=None, repe_dirs=None) -> dict:
-    """Newton iterations: α_next = α · sqrt(T / M). Stops when within band or n iters."""
-    alpha = float(cfg.alpha_init)
-    history = []
-    for k in range(cfg.n_newton_iters):
-        m = _measure_kl(
+def _illinois_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
+                        w=None, repe_dirs=None) -> dict:
+    """Exponential bracket within (bracket_lo, bracket_hi) then log-log Illinois
+    regula falsi. Mirrors steering-lite's validated `calibrate_iso_kl`.
+
+    Geometry: KL ~ α²·F near α=0, saturates at large α → log-log curve concave.
+    Plain secant chord lies below the curve, root estimate overshoots, one
+    endpoint goes stale. Illinois halves the stale endpoint's log-stat
+    (equivalent to dividing v by 2) once it's stuck for 2+ iters, giving
+    superlinear convergence on concave segments. Bracket bounds always
+    preserved; bisection fallback if interpolation lands outside.
+    """
+    history: list[dict] = []
+    iter_idx = [0]
+
+    def stat(alpha: float) -> float:
+        m = _measure_kl_along_trajectory(
             method, alpha, model=model, tok=tok, prompts=prompts,
             n_tokens=cfg.n_tokens, w=w, repe_dirs=repe_dirs,
             repe_layers=cfg.repe_layers,
+            log_first_sample=(iter_idx[0] == 0),
+            sample_label=f"calib iter=0 method={method} α={alpha:+.3f}",
         )
         ratio = m["p95"] / target if target > 0 else 1.0
-        history.append({"iter": k, "alpha": alpha, **m, "ratio": ratio})
+        history.append({"iter": iter_idx[0], "alpha": alpha, **m, "ratio": ratio})
         logger.info(
-            f"  [{method}] iter={k} α={alpha:+.4f} p95={m['p95']:.4g} "
+            f"  [{method}] iter={iter_idx[0]} α={alpha:+.4f} p95={m['p95']:.4g} "
             f"mean={m['mean']:.4g} max={m['max']:.4g} ratio={ratio:.3f}"
         )
-        if abs(ratio - 1.0) < cfg.convergence_band:
-            break
-        # Newton step (KL ~ α²·F): α_next = α · sqrt(T/M)
-        if m["p95"] <= 0:
-            alpha *= 2.0
-            continue
-        alpha = alpha * float(np.sqrt(target / m["p95"]))
+        iter_idx[0] += 1
+        return m["p95"]
 
-    final = history[-1]
-    converged = abs(final["ratio"] - 1.0) < cfg.convergence_band
+    lo, hi = float(cfg.bracket_lo), float(cfg.bracket_hi)
+    log_target = float(np.log(target))
+
+    # 1. Exponential bracket from geometric mid of (lo, hi)
+    mid = float(np.sqrt(lo * hi))
+    v_mid = stat(mid)
+    if abs(v_mid - target) < cfg.convergence_tol:
+        final = history[-1]
+        return {
+            "method": method, "calibrated_alpha": final["alpha"],
+            "p95_at_calib": final["p95"], "mean_at_calib": final["mean"],
+            "max_at_calib": final["max"], "ratio_at_calib": final["ratio"],
+            "iterations": len(history), "converged": True, "history": history,
+        }
+
+    if v_mid < target:
+        c_lo, v_lo = mid, v_mid
+        c_hi, v_hi = hi, None
+        c = mid
+        while c < hi:
+            c *= 2.0
+            v = stat(c)
+            if v >= target:
+                c_hi, v_hi = c, v
+                break
+            c_lo, v_lo = c, v
+    else:
+        c_hi, v_hi = mid, v_mid
+        c_lo, v_lo = lo, None
+        c = mid
+        while c > lo:
+            c /= 2.0
+            v = stat(c)
+            if v <= target:
+                c_lo, v_lo = c, v
+                break
+            c_hi, v_hi = c, v
+
+    if v_lo is None or v_hi is None:
+        # Couldn't bracket within (lo, hi); report last point seen.
+        final = history[-1]
+        return {
+            "method": method, "calibrated_alpha": final["alpha"],
+            "p95_at_calib": final["p95"], "mean_at_calib": final["mean"],
+            "max_at_calib": final["max"], "ratio_at_calib": final["ratio"],
+            "iterations": len(history), "converged": False, "history": history,
+        }
+
+    # 2. Log-log Illinois regula-falsi inside the bracket.
+    converged = False
+    stale_lo = stale_hi = 0
+    log2 = float(np.log(2))
+    for _ in range(cfg.n_root_iters):
+        if v_lo > 0 and v_hi > 0:
+            log_c_lo, log_c_hi = float(np.log(c_lo)), float(np.log(c_hi))
+            log_v_lo = float(np.log(v_lo)) - (log2 if stale_lo >= 2 else 0.0)
+            log_v_hi = float(np.log(v_hi)) - (log2 if stale_hi >= 2 else 0.0)
+            t = (log_target - log_v_lo) / (log_v_hi - log_v_lo)
+            log_c_new = log_c_lo + t * (log_c_hi - log_c_lo)
+            c_new = float(np.exp(log_c_new))
+            if not (c_lo < c_new < c_hi):  # bisection fallback
+                c_new = float(np.sqrt(c_lo * c_hi))
+        else:
+            c_new = float(np.sqrt(c_lo * c_hi))
+
+        v_new = stat(c_new)
+        if abs(v_new - target) < cfg.convergence_tol:
+            converged = True
+            break
+        if v_new < target:
+            c_lo, v_lo = c_new, v_new
+            stale_lo = 0
+            stale_hi += 1
+        else:
+            c_hi, v_hi = c_new, v_new
+            stale_hi = 0
+            stale_lo += 1
+
+    # If we exhausted iters without hitting tol, pick the closest point seen.
+    if not converged:
+        best = min(history, key=lambda h: abs(h["p95"] - target))
+        final = best
+    else:
+        final = history[-1]
+
     return {
         "method": method,
         "calibrated_alpha": final["alpha"],
@@ -255,30 +357,42 @@ def main(cfg: KLCalibrateCfg) -> None:
     model.eval()
 
     calib_prompts, audit_prompts = _select_prompts(cfg.n_calib_prompts, cfg.n_audit_prompts, cfg.seed)
-    logger.info(f"calibration prompts: {[p.get('cat') for p in calib_prompts]}")
+    logger.info(f"calibration prompts (n={len(calib_prompts)}): cats={[p.get('cat') for p in calib_prompts[:10]]}…")
     logger.info(f"audit prompts: n={len(audit_prompts)}")
 
-    # 1. Establish target T from the prompt anchor.
-    target_method = f"prompt:{cfg.target_prompt}"
-    logger.info(f"\n=== ANCHOR: {target_method} ===")
-    anchor = _measure_kl(
-        target_method, alpha=1.0, model=model, tok=tok, prompts=calib_prompts,
-        n_tokens=cfg.n_tokens,
+    # Sanity-print one full prompt + greedy sample under base BEFORE any
+    # method runs. This is the "did the chat template render correctly?" gate.
+    p0 = calib_prompts[0]
+    base_text = build_chat_text(tok, "", p0["user_msg"], "", thinking=True)
+    base_ids = build_chat_ids(tok, "", p0["user_msg"], "", thinking=True)
+    gen0, _ = greedy_generate_under_steering(
+        model, tok, base_ids, method="base", alpha=0.0, n_new_tokens=cfg.n_tokens,
     )
-    target = anchor["p95"]
-    logger.info(f"target p95 KL = {target:.4g} (mean={anchor['mean']:.4g}, max={anchor['max']:.4g})")
+    log_sample_prompt(tok, base_text, generated_ids=gen0,
+                      label="format-check base (open <think>, no steering)")
 
-    # Also measure simple_honest_prompt for reference.
-    ref_methods = ["simple_honest_prompt", "engineered_prompt_dishonest", "simple_dishonest_prompt"]
-    prompt_refs = {target_method: anchor}
-    for name in ref_methods:
-        if name in PROMPT_TEXTS and name != cfg.target_prompt:
-            m = _measure_kl(
-                f"prompt:{name}", alpha=1.0, model=model, tok=tok,
-                prompts=calib_prompts, n_tokens=cfg.n_tokens,
-            )
-            prompt_refs[f"prompt:{name}"] = m
-            logger.info(f"  ref prompt:{name} p95={m['p95']:.4g} mean={m['mean']:.4g}")
+    # 1. Target is the constant "side of the road" budget (gist: 1 nat).
+    target = float(cfg.target_kl)
+    logger.info(f"\ntarget p95 KL = {target:.4g} nats (constant; gist 'side of the road')")
+
+    # Measure prompt baselines at α=1 for diagnostics — these are the
+    # *uncalibrated* prompts (no continuous coefficient to scale), reported
+    # alongside the calibrated adapter/repe results.
+    logger.info(f"\n=== reference prompts (α=1, no calibration) ===")
+    ref_method_names = [cfg.target_prompt, "simple_honest_prompt",
+                        "engineered_prompt_dishonest", "simple_dishonest_prompt"]
+    prompt_refs = {}
+    for ji, name in enumerate(ref_method_names):
+        if name not in PROMPT_TEXTS:
+            continue
+        m = _measure_kl_along_trajectory(
+            f"prompt:{name}", alpha=1.0, model=model, tok=tok,
+            prompts=calib_prompts, n_tokens=cfg.n_tokens,
+            log_first_sample=(ji == 0),
+            sample_label=f"reference prompt:{name} α=+1.000",
+        )
+        prompt_refs[f"prompt:{name}"] = m
+        logger.info(f"  prompt:{name} p95={m['p95']:.4g} mean={m['mean']:.4g} max={m['max']:.4g}")
 
     # 2. Fit RepE directions once (used only if include_repe).
     repe_dirs = None
@@ -286,12 +400,12 @@ def main(cfg: KLCalibrateCfg) -> None:
         logger.info("\n=== fit RepE directions ===")
         repe_dirs = _fit_repe_directions(model, tok, cfg.n_repe_train, cfg.behavior)
 
-    # 3. Newton-calibrate each adapter and (optionally) RepE.
+    # 3. Illinois regula-falsi calibrate each adapter and (optionally) RepE.
     results = []
     for adapter in cfg.adapters:
         logger.info(f"\n=== calibrate dW:{adapter} ===")
         w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
-        r = _newton_calibrate(
+        r = _illinois_calibrate(
             f"dW:{adapter}", target, model=model, tok=tok,
             prompts=calib_prompts, cfg=cfg, w=w,
         )
@@ -299,7 +413,7 @@ def main(cfg: KLCalibrateCfg) -> None:
 
     if cfg.include_repe:
         logger.info("\n=== calibrate repe ===")
-        r = _newton_calibrate(
+        r = _illinois_calibrate(
             "repe", target, model=model, tok=tok,
             prompts=calib_prompts, cfg=cfg, repe_dirs=repe_dirs,
         )
@@ -307,23 +421,25 @@ def main(cfg: KLCalibrateCfg) -> None:
 
     # 4. Audit: at calibrated α, recompute on n_audit prompts.
     logger.info(f"\n=== AUDIT (n={len(audit_prompts)} prompts) ===")
-    # Anchor audit
-    anchor_audit = _measure_kl(
-        target_method, alpha=1.0, model=model, tok=tok,
-        prompts=audit_prompts, n_tokens=cfg.n_tokens,
-    )
-    logger.info(f"  anchor audit p95={anchor_audit['p95']:.4g} (calib was {target:.4g})")
 
-    audit_rows = [{
-        "method": target_method,
-        "alpha": 1.0,
-        "p95_calib": target,
-        "mean_calib": anchor["mean"],
-        "p95_audit": anchor_audit["p95"],
-        "mean_audit": anchor_audit["mean"],
-        "max_audit": anchor_audit["max"],
-        "calib_audit_ratio": anchor_audit["p95"] / target if target > 0 else float("nan"),
-    }]
+    audit_rows = []
+    # Reference prompts: re-measure on audit set (no calibration; α=1).
+    for name, m_calib in prompt_refs.items():
+        m_audit = _measure_kl_along_trajectory(
+            name, alpha=1.0, model=model, tok=tok,
+            prompts=audit_prompts, n_tokens=cfg.n_tokens,
+        )
+        logger.info(f"  {name} α=+1 audit p95={m_audit['p95']:.4g} (calib was {m_calib['p95']:.4g})")
+        audit_rows.append({
+            "method": name,
+            "alpha": 1.0,
+            "p95_calib": m_calib["p95"],
+            "mean_calib": m_calib["mean"],
+            "p95_audit": m_audit["p95"],
+            "mean_audit": m_audit["mean"],
+            "max_audit": m_audit["max"],
+            "calib_audit_ratio": m_audit["p95"] / m_calib["p95"] if m_calib["p95"] > 0 else float("nan"),
+        })
 
     for r in results:
         method = r["method"]
@@ -331,12 +447,12 @@ def main(cfg: KLCalibrateCfg) -> None:
         if method.startswith("dW:"):
             adapter = method.split(":", 1)[1]
             w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
-            m_audit = _measure_kl(
+            m_audit = _measure_kl_along_trajectory(
                 method, alpha, model=model, tok=tok, prompts=audit_prompts,
                 n_tokens=cfg.n_tokens, w=w,
             )
         elif method == "repe":
-            m_audit = _measure_kl(
+            m_audit = _measure_kl_along_trajectory(
                 method, alpha, model=model, tok=tok, prompts=audit_prompts,
                 n_tokens=cfg.n_tokens, repe_dirs=repe_dirs,
                 repe_layers=cfg.repe_layers,
@@ -359,10 +475,8 @@ def main(cfg: KLCalibrateCfg) -> None:
         })
 
     audit_df = pl.DataFrame(audit_rows)
-    audit_path = out_dir / "audit.csv"
-    audit_df.write_csv(audit_path)
+    audit_df.write_csv(out_dir / "audit.csv")
 
-    # Per-method summary (from results).
     summary_rows = []
     for r in results:
         summary_rows.append({
@@ -380,23 +494,19 @@ def main(cfg: KLCalibrateCfg) -> None:
     summary_path = out_dir / "summary.csv"
     summary_df.write_csv(summary_path)
 
-    # Per-iteration history (Newton trace, for diagnostics).
     history_rows = []
     for r in results:
         for h in r["history"]:
             history_rows.append({"method": r["method"], **h})
-    pl.DataFrame(history_rows).write_csv(out_dir / "newton_history.csv")
+    pl.DataFrame(history_rows).write_csv(out_dir / "root_history.csv")
 
-    # Prompt-anchor reference table.
-    pl.DataFrame([
-        {"method": k, **v} for k, v in prompt_refs.items()
-    ]).write_csv(out_dir / "prompt_refs.csv")
+    pl.DataFrame([{"method": k, **v} for k, v in prompt_refs.items()]).write_csv(out_dir / "prompt_refs.csv")
 
-    print("\n=== KL calibration summary ===")
-    print(f"target p95 KL (anchor={target_method}) = {target:.4g} nats")
+    print("\n=== KL calibration summary (gist-faithful: greedy trajectory KL) ===")
+    print(f"target p95 KL = {target:.4g} nats (constant; gist 'side of the road')")
     print(tabulate(summary_df.to_pandas(), headers="keys", tablefmt="tsv",
                    floatfmt="+.4g", showindex=False))
-    print("\naudit (held-out 150 prompts):")
+    print(f"\naudit (held-out {len(audit_prompts)} prompts):")
     print(tabulate(audit_df.to_pandas(), headers="keys", tablefmt="tsv",
                    floatfmt="+.4g", showindex=False))
 
