@@ -121,32 +121,37 @@ bidirectional uses a=-1/0/+1 from the activation_baseline sweep.
 
 `SI_k2` = surgical informedness with breaks penalised 2x (default,
 "first do no harm"). `SI_k1` = symmetric (breaks weighted 1x). `SI_best`
-= sign-aligned `max(si_fwd, si_rev) * pmass^2 * 100` — robustness probe
-for "if we picked the steering sign post-hoc, how good can it look?";
-this is snooping, treat as upper bound. `fix_rate` = fix_fwd / n_rej,
+= post-hoc sign-aligned upper bound: at each method we take the
+better of (a) treating a=+1 as the honest direction (`si_fwd`) and
+(b) treating a=-1 as the honest direction by role-swapping the
+confusion matrix so `counter_rev` becomes "fix" and `flip_rev`
+becomes "broke" (`counter_rate - 2 * flip_rate`). Under k=2 this is
+*not* the same as `-si_rev` because the FPR penalty hits the swapped
+rate. Treat as snooping, an upper bound. `fix_rate` = fix_fwd / n_rej,
 `broke_rate` = broke_fwd / n_cho. All numbers single-seed (N=1).
 
 | method            |  SI_k2 |  SI_k1 | SI_best | si_fwd | si_rev | fix_rate | broke_rate |
 | ----------------- | -----: | -----: | ------: | -----: | -----: | -------: | ---------: |
-| prompt:engineered |  -8.88 |  -0.58 |   +2.62 | +0.033 | -0.254 |    0.149 |      0.058 |
+| prompt:engineered |  -8.88 |  -0.58 |   +4.95 | +0.033 | -0.254 |    0.149 |      0.058 |
+| prompt:simple     | -16.00 |  -1.83 |   +3.46 | -0.162 | -0.212 |    0.245 |      0.203 |
+| RepE all-layers   |  -6.86 |  +0.97 |   +0.79 | +0.009 | -0.173 |    0.149 |      0.070 |
 | oft               |  -3.37 |  -0.21 |   +0.16 | +0.002 | -0.080 |    0.043 |      0.020 |
 | ia3               |  -0.47 |  +0.26 |   -0.09 | -0.001 | -0.010 |    0.011 |      0.006 |
-| RepE all-layers   |  -0.21 |  +0.09 |   -0.16 | -0.057 | -0.093 |    0.136 |      0.096 |
-| RepE dW:delora    |  -0.85 |  +0.01 |   -0.67 | -0.318 | -0.208 |    0.251 |      0.285 |
-| pissa             | -27.27 |  -5.65 |  -13.66 | -0.178 | -0.531 |    0.160 |      0.169 |
-| dora              | -25.78 |  -6.31 |  -13.80 | -0.165 | -0.451 |    0.149 |      0.157 |
-| prompt:simple     | -16.00 |  -1.83 |  -13.89 | -0.162 | -0.212 |    0.245 |      0.203 |
-| lora              | -27.13 |  -6.88 |  -14.61 | -0.176 | -0.476 |    0.138 |      0.157 |
-| delora            | -34.29 |  -4.85 |  -15.70 | -0.607 | -0.180 |    0.213 |      0.410 |
+| dora              | -25.78 |  -6.31 |   -1.91 | -0.165 | -0.451 |    0.149 |      0.157 |
+| lora              | -27.13 |  -6.88 |   -3.04 | -0.176 | -0.476 |    0.138 |      0.157 |
+| pissa             | -27.27 |  -5.65 |   -9.08 | -0.178 | -0.531 |    0.160 |      0.169 |
+| delora            | -34.29 |  -4.85 |  -38.12 | -0.607 | -0.180 |    0.213 |      0.410 |
 
-Read: every method has *negative* bidirectional SI under k=2. Only
-the engineered prompt and OFT clear zero on `SI_best` (sign-aligned
-upper bound). DeLoRA's `SI_k2` is worst (-34.3) because its `broke_rate`
-0.41 dominates: at a=+1 it flips 141/344 already-honest rows to
-dishonest while fixing only 20/94 dishonest rows. The mean logratio
-still climbs +0.237 at a=+1 because the few rows it pushes correctly
-move by a lot (std_lr 1.97 -> 5.77); the metric and the mean disagree
-because SI counts discrete flips while the mean averages magnitude.
+Read: every method has *negative* bidirectional SI under k=2. Under
+`SI_best` (post-hoc sign-aligned upper bound), both prompt baselines
+and RepE clear zero; among adapters only OFT is positive, and the
+gap to engineered prompts is large. DeLoRA's `SI_k2` is worst (-34.3)
+because its `broke_rate` 0.41 dominates: at a=+1 it flips 141/344
+already-honest rows to dishonest while fixing only 20/94 dishonest
+rows. The mean logratio still climbs +0.237 at a=+1 because the few
+rows it pushes correctly move by a lot (std_lr 1.97 -> 5.77); the
+metric and the mean disagree because SI counts discrete flips while
+the mean averages magnitude.
 
 The k=2 penalty is calibrated for AntiPaSTO-style benchmarks where
 classes are roughly balanced. Here the *response distribution* is
@@ -154,10 +159,10 @@ classes are roughly balanced. Here the *response distribution* is
 intervention that touches a sizeable fraction of rows. `SI_k1`
 (symmetric) is the calibration-free read.
 
-The only `+SI_best` adapter is OFT and the gap to engineered prompts
-is small. RepE is near zero on every variant. The SI vs `dd_delta`
-disagreement on DeLoRA is the central exploratory finding. T4
-multiseed and T5 Gemma will test whether the ranking is stable.
+The only `+SI_best` adapter is OFT and the gap to both prompt
+baselines is large. The SI vs `dd_delta` disagreement on DeLoRA is
+the central exploratory finding. T4 multiseed and T5 Gemma will
+test whether the ranking is stable.
 
 ### OOD: raw mean ± std logratio_honesty per (method, coeff)
 
@@ -172,14 +177,7 @@ multiseed and T5 Gemma will test whether the ranking is stable.
 | delora            |     0.174 ± 1.319  | 1.326 ± 1.969 |   1.563 ± 5.770 |
 | prompt:engineered |     1.375 ± 2.043  | 1.326 ± 1.969 |   1.371 ± 1.829 |
 | prompt:simple     |     1.378 ± 2.064  | 1.326 ± 1.969 |   0.874 ± 1.621 |
-| RepE all-layers   |     0.154 ± 2.673  | 0.195 ± 2.357 |   0.245 ± 2.202 |
-| RepE dW:delora    |     0.024 ± 2.585  | 0.195 ± 2.357 |   0.369 ± 3.347 |
-
-Note RepE rows have mean_pmass ≈ 0.17 (vs ≈ 0.94 for adapters and
-prompts) — the activation_baseline run was not formatted to score
-Yes/No tokens cleanly, so its absolute logratios are noisy. The
-relative shift across coeff is still informative but treat the SI
-and dd magnitudes with caution until that run is rebuilt.
+| RepE all-layers   |     1.405 ± 2.339  | 1.326 ± 1.969 |   1.307 ± 2.037 |
 
 ### IID: held-out persona Yes/No claims
 
@@ -207,21 +205,26 @@ not a "the dW didn't learn anything" gap — they all learned an IID
 direction; only OFT (and prompt:engineered) generalise without
 breaking the response distribution.
 
-### DeLoRA: magnitude vs elementwise direction
+### DeLoRA: per-tensor norm allocation vs within-tensor direction
 
 <!-- source: out/honesty/dw_decomp_ablation/delora/summary.csv
      produced by: ws.eval.dw_decomp_ablation -->
 
-To test whether the trained dW's behavior is carried by *which weights
-move how much* (per-tensor magnitude pattern) or by *which way each
-weight moves* (elementwise direction), we evaluate four variants of
-the DeLoRA dW (total ||dW||_F = 33.43, kept identical across variants):
+To test whether the trained dW's behavior is carried by *how much
+each tensor moves* (the per-tensor Frobenius-norm allocation across
+layers/modules) or by *the within-tensor direction* (elementwise
+pattern inside each tensor), we evaluate four variants of the DeLoRA
+dW (total ||dW||_F = 33.43, kept identical across variants). Each
+variant preserves at most one scalar per tensor (its norm) plus
+either the original within-tensor structure or a single Gaussian
+draw — so this isolates *per-tensor norm* vs *within-tensor
+direction*, not a broader notion of "magnitude pattern":
 
 | variant       | meaning                                          |
 | ------------- | ------------------------------------------------ |
 | `full`        | original trained dW (control)                    |
-| `dir_only`    | elementwise direction kept; every tensor rescaled to a common Frobenius norm (flattens magnitude pattern) |
-| `mag_only`    | random Gaussian per tensor, scaled to original per-tensor norm (preserves magnitude pattern) |
+| `dir_only`    | within-tensor direction kept; every tensor rescaled to a common Frobenius norm (flattens per-tensor norm allocation) |
+| `mag_only`    | random Gaussian per tensor, scaled to the original per-tensor norm (preserves only the per-tensor norm scalar; within-tensor direction random) |
 | `random_norm` | random Gaussian + common norm (control: nothing learned) |
 
 Daily-dilemmas honesty eval, full split, base persona, single seed:
@@ -233,25 +236,28 @@ Daily-dilemmas honesty eval, full split, base persona, single seed:
 | mag_only    | -34.75 | +0.007 | -0.754 |           16/28  |             187/61  |        +1.068  |        -1.191  |
 | random_norm | -13.36 | -0.272 | -0.119 |           16/76  |              25/9   |        -0.143  |        -0.011  |
 
-Read: stripping the magnitude pattern (`dir_only`) collapses the
-positive-direction effect from +0.237 to +0.024 and worsens SI.
-Stripping the elementwise direction but keeping per-tensor magnitudes
-(`mag_only`) gives a *larger* positive shift (+1.07) with *fewer*
-broken rows (28 vs 141) than the trained dW. So the per-tensor
-magnitude pattern — which layers and modules carry how much weight
-update — explains most of the steering at α=+1; the learned
-elementwise direction does little extra work and at α=−1 looks worse
-than random. `random_norm` "wins" SI only by virtue of being a near
-no-op (the metric flatters non-interventions when classes are
+Read: stripping the per-tensor norm allocation (`dir_only`) collapses
+the positive-direction mean shift from +0.237 to +0.024 and worsens
+SI. Stripping the within-tensor direction but keeping per-tensor
+Frobenius norms (`mag_only`) gives a *larger* positive mean shift
+(+1.07) with *fewer* broken rows (28 vs 141) than the trained dW.
+This narrowly supports "per-tensor norm allocation across
+layers/modules carries most of the α=+1 effect"; it does *not*
+support a broader claim that the entire weight-space magnitude
+pattern is what matters, since `mag_only` already discards every
+within-tensor magnitude relationship. `mag_only` and `random_norm`
+are also single-seed Monte Carlo controls; the specific +1.07 number
+is seed-sensitive. `random_norm` "wins" SI only by virtue of being a
+near no-op (the metric flatters non-interventions when classes are
 imbalanced); compare `delta_pos`/`delta_neg` to see it doesn't
 actually steer.
 
-This says the dW for DeLoRA is mostly a *layer/module attention
-allocation* (magnitude pattern), not a learned semantic direction
-inside each tensor. T7 layer/module ablation tests the same question
-from the other side. If true under multiseed and on Gemma, it implies
-weight steering for honesty needs only a learnable per-tensor scalar,
-not a low-rank direction — a much smaller hypothesis class.
+This says the dW for DeLoRA is mostly a *layer/module norm
+allocation*, not a learned within-tensor direction. T7 layer/module
+ablation tests the same question from the other side. If true under
+multiple seeds and on Gemma, it implies weight steering for honesty
+needs only a learnable per-tensor scalar, not a low-rank direction
+inside each tensor — a much smaller hypothesis class.
 
 ### Subspace/projection lesson
 

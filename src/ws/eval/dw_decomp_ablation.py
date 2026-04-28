@@ -1,18 +1,28 @@
-"""DeLoRA magnitude vs direction ablation.
+"""DeLoRA per-tensor norm allocation vs within-tensor direction ablation.
 
-Question: is the trained dW useful because of (a) its element-wise direction
-or (b) the per-tensor magnitude pattern (which layers / modules get bigger
-updates)? Constructs three variants:
+Question: is the trained dW useful because of (a) its within-tensor
+elementwise direction or (b) the per-tensor norm allocation (which
+layers / modules get larger Frobenius-norm updates)? Each variant
+preserves only one scalar per tensor (its Frobenius norm) or the full
+tensor; within-tensor structure is either kept (full/dir_only) or
+replaced by a single Gaussian draw (mag_only/random_norm). So this
+isolates *per-tensor norm* vs *within-tensor direction*, not a broader
+"magnitude pattern" notion. Variants:
 
   full         original dW (control)
   dir_only     dW with all tensors rescaled to a common Frobenius norm
-               (preserves elementwise direction; flattens the per-tensor
-               magnitude pattern)
-  mag_only     each tensor replaced by a Gaussian random tensor scaled to
-               the original tensor's norm (preserves the per-tensor
-               magnitude pattern; randomises the direction)
+               (preserves within-tensor direction; flattens per-tensor
+               norm allocation)
+  mag_only     each tensor replaced by a single Gaussian draw rescaled
+               to the original tensor's Frobenius norm (preserves only
+               the per-tensor norm scalar; within-tensor direction is
+               random and seed-sensitive)
   random_norm  Gaussian random tensors all rescaled to a common norm
-               (control: neither direction nor magnitude pattern)
+               (control: neither within-tensor direction nor per-tensor
+               norm allocation)
+
+mag_only and random_norm are single-seed Monte Carlo controls; rerun
+across seeds before leaning on these conclusions.
 
 Eval all four on daily-dilemmas (full 219 split) at coeffs {-1, 0, +1}
 and dump dilemmas_per_row.csv so SI can be recomputed offline.
