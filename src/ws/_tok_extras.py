@@ -1,5 +1,13 @@
 """Tiny tokenizer utilities with no ws imports (avoids circular deps)."""
 
+THINK_CLOSE = "</think>"
+
+
+def has_thinking_mode(tok) -> bool:
+    """True iff the tokenizer has </think> as a genuine special token (Qwen3)."""
+    tid = tok.convert_tokens_to_ids(THINK_CLOSE)
+    return tid is not None and tid != tok.unk_token_id
+
 
 def chat_template_extras(tok) -> dict:
     """Extra kwargs for apply_chat_template that vary by model family.

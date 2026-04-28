@@ -18,6 +18,7 @@ from tabulate import tabulate
 from transformers import AutoTokenizer
 
 from ws._log import final_summary, get_argv, setup_logging
+from ws._tok_extras import has_thinking_mode
 from ws.data import DataCfg, generate_pairs, load_pairs
 from ws.diff import compute_diff, load_base_state, load_delta, save_diff
 from ws.eval.sycophancy import EvalCfg, evaluate, summarize
@@ -133,8 +134,11 @@ def main(cfg: Cfg) -> None:
     dcfg = DemoCfg(model=cfg.model, behavior=cfg.behavior, adapter=cfg.adapter, out=cfg.out)
     claims = _demo_claims(dcfg.ood_claim)
     phase_a1(dcfg, claims, tok)
-    demo_df = phase_a2(dcfg, claims, tok)
-    demo_df.write_csv(out_dir / "demo_guided_cot.csv")
+    if has_thinking_mode(tok):
+        demo_df = phase_a2(dcfg, claims, tok)
+        demo_df.write_csv(out_dir / "demo_guided_cot.csv")
+    else:
+        logger.info("skipping guided-CoT demo: model has no </think> special token")
 
     # BLUF: headline = max margin across alpha sweep on in_dist claim
     sp = summary.to_pandas()

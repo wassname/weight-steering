@@ -1,368 +1,92 @@
 # Weight Steering
 
-> **Fork notice (wassname, 2026-04):** this is a working fork that strips the
-> upstream Axolotl + vLLM + Anthropic-batch-API stack and rebuilds the core
-> method on HF + PEFT + uv, targeting Qwen3-0.6B for cheap iteration. Goals:
-> (1) replicate `w = θ⁺ − θ⁻` on a small model, (2) test alignment of `w` with
-> SVD subspaces of the pretrained `W` and the AntiPaSTO subspaces, (3) compare
-> adapter families (LoRA / DoRA / PiSSA-init / DeLoRA) under the
-> "adapter as hypothesis" framing, (4) eval on daily-dilemmas.
->
-> Pipeline (see `justfile`):
-> ```
-> just smoke           # full pipeline on tiny-random qwen3 + BEARTYPE=1, ~1 min
-> just replicate       # data → train pos → train neg → diff → eval → subspace
-> just subspace-align  # phase 2: SVD top-k + weak-readout alignment table
-> just adapter-sweep   # phase 3: LoRA / DoRA / PiSSA / DeLoRA sweep
-> just eval-dilemmas   # phase 4: daily-dilemmas Yes/No logratio
-> ```
-> Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_subspace,run_sweep}.py`,
-> `src/ws/eval/{sycophancy,dilemmas}.py`. Outputs to `out/<behavior>/<adapter>/`.
->
-> Scope. Not a strict replication. Now matches paper-style recipe on data
-> (20 train + 12 eval topics × 5 personas × 10 samples = 1000 pairs;
-> judge filter stubbed, off by default, paper uses GPT-4.1-mini) and
-> current PEFT hyperparams (rank 32 / LoRA α 64 / lr 2e-4 / warmup 5 /
-> wd 0.01 / seed 0 / one epoch).
-> Deliberate divergences from upstream: no quantized base loading
-> (DoRA/PiSSA/DeLoRA support is uncertain; bf16 fits at 0.6B), no
-> `modules_to_save` for `embed_tokens` / `lm_head`, and a layer slice
-> (LoRA on layers 30%-80%, steering-locus literature) instead of full
-> coverage. The contrastive `θ⁺ − θ⁻` core is preserved.
->
-> **Initial finding on Qwen3-0.6B.** Weight steering works cheaply at this
-> scale, but the useful adapter parameterization and the interpretable
-> subspace are separate questions. The current best raw adapter is DeLoRA;
-> PiSSA is the cleaner stable baseline; PCA-style planning-subspace overlap
-> does not explain the trained behavior.
+Fork of Fierro & Roger 2025, rebuilt on HF + PEFT + uv, targeting Qwen3-0.6B.
+Method: `dW = theta_pos - theta_neg`, then add `alpha * dW` at inference.
 
-## Current internal findings (N=1; exploratory)
+## Results (Qwen3-0.6B, honesty, N=1, single seed)
 
-These numbers are single-seed, single-model research notes, not a full
-benchmark. All rows below use `Qwen/Qwen3-0.6B`, seed 0, honesty-axis
-training data, PEFT adapters trained for one epoch on layers 8-21 (30%-80%
-of 28 layers) except IA3, whose PEFT config does not support
-`layers_to_transform` and therefore touches all layers. Target modules for
-LoRA-family adapters are `q/k/v/o/gate/up/down_proj`.
+All evals use base persona at eval time. No system prompt.
 
-Training uses opposite honesty personas (vgel/repeng short-form convention).
-POS = "Pretend you're {an honest / a truthful / a candid / a straightforward / a sincere} person." (5 paraphrases).
-NEG = "Pretend you're {a dishonest / a deceptive / a manipulative / a misleading / a lying} person." (5 paraphrases).
-The base model generates 1000 prompt/response pairs per branch under those
-system prompts (paper recipe, Fierro & Roger §F.1). Each adapter is SFT-fit
-to its branch. `dW = θ_pos - θ_neg` carries the honesty direction.
-Question pool: 550 branching-suffix entries (`data/branching_suffixes.json`).
+### OOD: surgical informedness on daily-dilemmas (full split, 219 dilemmas, 438 action rows)
 
-All evals run with **no system prompt** at eval time (base persona). The
-persona pair only enters during data prep or fitting:
+Surgical informedness SI_k2 = fix_rate - 2 * broke_rate (penalises regressions 2x). SI_best = post-hoc sign-aligned upper bound (snooping).
 
-| stage                               | pos uses           | neg uses              | how                              |
-| ----------------------------------- | ------------------ | --------------------- | -------------------------------- |
-| adapter training data generation    | `POS[0..4]`        | `NEG[0..4]`           | system prompt during generation  |
-| RepE direction fit (T1)             | `POS[0]`           | `NEG[0]`              | system prompt for hidden capture |
-| prompt baseline: simple_honest (T3) | n/a                | "honest assistant"    | system prompt at eval time       |
-| prompt baseline: engineered (T3)    | AxBench J.2 honest | AxBench J.2 dishonest | system prompt at eval time       |
-| daily-dilemmas eval                 | n/a                | n/a                   | base persona, no system prompt   |
+| method            |  SI_k2 |  SI_k1 | SI_best | fix_rate | broke_rate |
+| ----------------- | -----: | -----: | ------: | -------: | ---------: |
+| prompt:engineered |  -8.88 |  -0.58 |   +4.95 |    0.149 |      0.058 |
+| prompt:simple     | -16.00 |  -1.83 |   +3.46 |    0.245 |      0.203 |
+| RepE all-layers   |  -6.86 |  +0.97 |   +0.79 |    0.149 |      0.070 |
+| oft               |  -3.37 |  -0.21 |   +0.16 |    0.043 |      0.020 |
+| ia3               |  -0.47 |  +0.26 |   -0.09 |    0.011 |      0.006 |
+| dora              | -25.78 |  -6.31 |   -1.91 |    0.149 |      0.157 |
+| lora              | -27.13 |  -6.88 |   -3.04 |    0.138 |      0.157 |
+| pissa             | -27.27 |  -5.65 |   -9.08 |    0.160 |      0.169 |
+| delora            | -34.29 |  -4.85 |  -38.12 |    0.213 |      0.410 |
 
-The dW and RepE methods do not put any persona into the eval-time prompt;
-they intervene on weights or activations instead.
+Every method is negative under SI_k2. Among adapters only OFT clears zero under SI_best, with a large gap to engineered prompts. DeLoRA's broke_rate 0.41 (141/344 already-honest rows flipped) dominates.
 
-### Notation
+### OOD: SI at KL-calibrated alpha (matched off-task p95 token-KL ~ 0.61 nats)
 
-- `α`, also called `coeff`: steering strength. Weight steer adds `α * dW`.
-  RepE adds `α * direction` to the residual stream. `α = 0` is the unmodified base.
-- `mean_logratio = log p(Yes) - log p(No)`: how strongly the model prefers Yes.
-- `logratio_honesty = (log p(Yes) - log p(No)) * honesty_label`: same logratio,
-  signed so that larger means more honest. The dataset labels each (dilemma, action)
-  with which answer is honest.
-- `dd_delta`: change in mean `logratio_honesty` between an intervention row and
-  `base @ α=0` on the same dilemmas.
-- `pmass = p(Yes) + p(No)`: probability mass on the two scored tokens.
-  Sanity check that the model is answering in-format. If `pmass` is low, the
-  model is talking instead of choosing.
-- `dW = θ_pos - θ_neg`: weight diff after merging each adapter into the base.
-- `||dW||`: Frobenius norm of the diff, summed across touched parameters.
+| method                   |    alpha |    SI | fix | broke | broke% |
+| ------------------------ | -------: | ----: | --: | ----: | -----: |
+| prompt:eng_dishonest     |    +1.00 | +5.41 |  14 |    15 |   4.4% |
+| prompt:simple_dishonest  |    +1.00 | +3.57 |  12 |    15 |   4.4% |
+| prompt:engineered_honest |    +1.00 | +2.62 |  14 |    20 |   5.8% |
+| repe                     |    +2.30 | -5.29 |  15 |    20 |   5.8% |
+| prompt:simple_honest     |    +1.00 |-13.89 |  23 |    70 |  20.3% |
+| dW:oft                   |    +8.22 |-25.97 |  16 |    86 |  25.0% |
+| dW:delora                |    +0.78 |-29.79 |  18 |   121 |  35.2% |
+| dW:pissa                 |    +1.17 |-32.03 |  16 |    65 |  18.9% |
+| dW:ia3                   |   +34.94 |-43.57 |  16 |    87 |  25.3% |
+| dW:lora                  |    +2.16 |-52.72 |  19 |   133 |  38.7% |
+| dW:dora                  |    +2.30 |-56.96 |  19 |   139 |  40.4% |
 
-### What was measured
+At matched off-task KL, all 6 adapters land deeply negative SI. Fix counts cluster at 14-19 across all methods; adapters break 65-139 already-honest rows while engineered prompts break 15-20. Adapters perturb uniformly across all tokens; prompts perturb topic-conditionally, spending the same KL budget where it matters.
 
-- Sycophancy ID eval: held-out sycophancy Yes/No prompts, 12 eval rows per
-    coefficient. Metric is `mean_logratio = log p(Yes) - log p(No)`; larger
-    means more sycophantic agreement. `pmass` is probability mass on Yes/No, a
-    sanity check that the model is answering in-format.
-- Daily dilemmas OOD eval: `wassname/daily_dilemmas-self-honesty`,
-    `honesty_eval`, full split of 219 dilemmas = 438 action rows per coefficient.
-    Metric is `logratio_honesty = (log p(Yes) - log p(No)) * honesty_label`, so
-  larger means more honest. `honesty_label` is computed from
-  `kellycyy/daily_dilemmas:Action_to_party_to_value` filtered to
-  `party == "You"`; the inherited `values_aggregated` field is all-party
-  context and is not the label source. The HF dataset now includes explicit
-  provenance columns (`you_values`, `label_source`, `values_aggregated_scope`).
-  Tables below use base persona only. A previous summary accidentally averaged
-  `base@0` with the AxBench `honest_engineer` persona baseline;
-  `cross_adapter_v9.py` now reads `dilemmas_per_row.csv` and filters
-  `persona == "base"`.
-- Projection diagnostic: decomposes residual-output
-    weights (`o_proj`, `down_proj`) into the part inside a post-hoc activation
-    PCA subspace (`project_act_block`) and its orthogonal remainder
-    (`complement_act_block`) to test whether low overlap hides the load-bearing
-    steering component.
+### IID: held-out Yes/No claims (12 claims, alpha=+1)
 
-### OOD: surgical informedness on daily dilemmas
+| adapter | mean_lr | shift vs base |
+| ------- | ------: | ------------: |
+| pissa   |   8.437 |        +5.708 |
+| delora  |   7.198 |        +4.469 |
+| lora    |   6.531 |        +3.802 |
+| dora    |   6.156 |        +3.427 |
+| oft     |   3.917 |        +1.188 |
+| ia3     |   2.719 |        -0.010 |
 
-<!-- source adapters: out/honesty/cross_adapter_full_dd/dilemmas_per_row.csv
-     source prompts:  out/honesty/prompt_baseline/dilemmas_per_row.csv
-     source RepE:     out/honesty/activation_baseline/dilemmas_per_row.csv
-     produced by:     nbs/honesty_tables.py -->
+All adapters except IA3 learn the IID direction. The OOD failure (negative SI) is a generalisation gap, not a training failure.
 
-Daily-dilemmas honesty eval, base persona at eval time, full 219-dilemma
-split (438 action rows / coeff; at a=0 the base picks the honest action
-on n_cho=344 rows and the dishonest one on n_rej=94 — the ~78/22 split
-is the *base model's response distribution*, not the data, since each
-dilemma has one honest and one dishonest action by construction).
+### DeLoRA: within-tensor direction vs per-tensor norm allocation
 
-Prompt baselines are paired so dishonest_prompt = a=-1, base = a=0,
-honest_prompt = a=+1, giving full bidirectional SI like dW. RepE
-bidirectional uses a=-1/0/+1 from the activation_baseline sweep.
+| variant     |     SI | fix/broke @ a=+1 | mean_lr delta@a=+1 |
+| ----------- | -----: | ---------------: | -----------------: |
+| full        | -34.29 |          20/141  |             +0.237 |
+| dir_only    | -41.00 |          20/146  |             +0.024 |
+| mag_only    | -34.75 |           16/28  |             +1.068 |
+| random_norm | -13.36 |           16/76  |             -0.143 |
 
-`SI_k2` = surgical informedness with breaks penalised 2x (default,
-"first do no harm"). `SI_k1` = symmetric (breaks weighted 1x). `SI_best`
-= post-hoc sign-aligned upper bound: at each method we take the
-better of (a) treating a=+1 as the honest direction (`si_fwd`) and
-(b) treating a=-1 as the honest direction by role-swapping the
-confusion matrix so `counter_rev` becomes "fix" and `flip_rev`
-becomes "broke" (`counter_rate - 2 * flip_rate`). Under k=2 this is
-*not* the same as `-si_rev` because the FPR penalty hits the swapped
-rate. Treat as snooping, an upper bound. `fix_rate` = fix_fwd / n_rej,
-`broke_rate` = broke_fwd / n_cho. All numbers single-seed (N=1).
+`dir_only` (within-tensor direction kept, per-tensor norm flattened): positive mean shift collapses from +0.237 to +0.024. `mag_only` (per-tensor norm kept, within-tensor direction random): larger positive shift (+1.07) with fewer broken rows (28 vs 141). Suggests the DeLoRA dW is mostly a layer/module norm allocation, not a learned within-tensor direction.
 
-| method            |  SI_k2 |  SI_k1 | SI_best | si_fwd | si_rev | fix_rate | broke_rate |
-| ----------------- | -----: | -----: | ------: | -----: | -----: | -------: | ---------: |
-| prompt:engineered |  -8.88 |  -0.58 |   +4.95 | +0.033 | -0.254 |    0.149 |      0.058 |
-| prompt:simple     | -16.00 |  -1.83 |   +3.46 | -0.162 | -0.212 |    0.245 |      0.203 |
-| RepE all-layers   |  -6.86 |  +0.97 |   +0.79 | +0.009 | -0.173 |    0.149 |      0.070 |
-| oft               |  -3.37 |  -0.21 |   +0.16 | +0.002 | -0.080 |    0.043 |      0.020 |
-| ia3               |  -0.47 |  +0.26 |   -0.09 | -0.001 | -0.010 |    0.011 |      0.006 |
-| dora              | -25.78 |  -6.31 |   -1.91 | -0.165 | -0.451 |    0.149 |      0.157 |
-| lora              | -27.13 |  -6.88 |   -3.04 | -0.176 | -0.476 |    0.138 |      0.157 |
-| pissa             | -27.27 |  -5.65 |   -9.08 | -0.178 | -0.531 |    0.160 |      0.169 |
-| delora            | -34.29 |  -4.85 |  -38.12 | -0.607 | -0.180 |    0.213 |      0.410 |
+## How to run
 
-Read: every method has *negative* bidirectional SI under k=2. Under
-`SI_best` (post-hoc sign-aligned upper bound), both prompt baselines
-and RepE clear zero; among adapters only OFT is positive, and the
-gap to engineered prompts is large. DeLoRA's `SI_k2` is worst (-34.3)
-because its `broke_rate` 0.41 dominates: at a=+1 it flips 141/344
-already-honest rows to dishonest while fixing only 20/94 dishonest
-rows. The mean logratio still climbs +0.237 at a=+1 because the few
-rows it pushes correctly move by a lot (std_lr 1.97 -> 5.77); the
-metric and the mean disagree because SI counts discrete flips while
-the mean averages magnitude.
+```sh
+# Quick sanity check (~1 min, tiny random Qwen3)
+just smoke
 
-The k=2 penalty is calibrated for AntiPaSTO-style benchmarks where
-classes are roughly balanced. Here the *response distribution* is
-3.7:1 (n_cho/n_rej), so `2 * broke_rate` swamps `fix_rate` for any
-intervention that touches a sizeable fraction of rows. `SI_k1`
-(symmetric) is the calibration-free read.
+# Full pipeline for one adapter
+uv run python -m ws.replicate --model Qwen/Qwen3-0.6B --behavior honesty --adapter lora
 
-The only `+SI_best` adapter is OFT and the gap to both prompt
-baselines is large. The SI vs `dd_delta` disagreement on DeLoRA is
-the central exploratory finding. T4 multiseed and T5 Gemma will
-test whether the ranking is stable.
+# All adapters
+uv run python -m ws.run_sweep --behavior honesty --n-personas 1 --n-samples 50
 
-### OOD: raw mean ± std logratio_honesty per (method, coeff)
+# KL calibration then daily-dilemmas eval
+uv run python -m ws.eval.kl_calibrate --behavior honesty
+uv run python -m ws.eval.dilemmas_calibrated --behavior honesty
+```
 
-| method            |  a=-1 (mean ± std) |   a=0 |  a=+1 (mean ± std) |
-| ----------------- | -----------------: | ----: | -----------------: |
-| base              |                  - | 1.326 ± 1.969 |        - |
-| ia3               |     1.294 ± 1.915  | 1.326 ± 1.969 |   1.356 ± 2.016 |
-| oft               |     1.215 ± 1.834  | 1.326 ± 1.969 |   1.381 ± 2.090 |
-| dora              |     1.156 ± 1.930  | 1.326 ± 1.969 |   1.342 ± 2.791 |
-| lora              |     1.104 ± 1.890  | 1.326 ± 1.969 |   1.403 ± 2.873 |
-| pissa             |     0.846 ± 1.695  | 1.326 ± 1.969 |   1.368 ± 2.941 |
-| delora            |     0.174 ± 1.319  | 1.326 ± 1.969 |   1.563 ± 5.770 |
-| prompt:engineered |     1.375 ± 2.043  | 1.326 ± 1.969 |   1.371 ± 1.829 |
-| prompt:simple     |     1.378 ± 2.064  | 1.326 ± 1.969 |   0.874 ± 1.621 |
-| RepE all-layers   |     1.405 ± 2.339  | 1.326 ± 1.969 |   1.307 ± 2.037 |
+Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_sweep}.py`, `src/ws/eval/{sycophancy,dilemmas,kl_calibrate,dilemmas_calibrated}.py`. Outputs to `out/<behavior>/<adapter>/`.
 
-### OOD: SI at KL-calibrated α (matched off-task distribution shift)
-
-Comparing adapter steering at α=1 vs prompts is structurally unfair: α=1
-means very different things across LoRA / PiSSA / DeLoRA / OFT / IA3 / RepE
-/ prompt. We replace it with a principled budget — the prompt's *off-task*
-KL footprint. Concretely: we measure mean per-token KL(steered ‖ base)
-over the last 20 positions of held-out continuations on 50 diverse prompts
-(branching_suffixes.json, stratified across 10 categories), and Newton-search
-α per method to match `prompt:engineered_prompt_honest`'s p95 token-KL ≈ 0.61
-nats. All 7 methods converge in 2-3 iterations. Audit on 100 disjoint prompts
-gives calib/audit p95 ratio 1.07-1.15 for adapters (stable) and 1.78 for the
-prompt anchor (heavier topic-conditional tail). Source:
-`src/ws/eval/kl_calibrate.py` → `out/honesty/kl_calibration/`.
-
-Re-eval daily-dilemmas at calibrated ±α:
-
-| method                         |    α   |     SI |  fix |  broke | broke% (of n_cho=344) |
-| ------------------------------ | -----: | -----: | ---: | -----: | --------------------: |
-| prompt:eng_dishonest           |  +1.00 |  +5.41 |   14 |     15 |                  4.4% |
-| prompt:simple_dishonest        |  +1.00 |  +3.57 |   12 |     15 |                  4.4% |
-| prompt:engineered_honest       |  +1.00 |  +2.62 |   14 |     20 |                  5.8% |
-| repe                           |  +2.30 |  -5.29 |   15 |     20 |                  5.8% |
-| prompt:simple_honest           |  +1.00 | -13.89 |   23 |     70 |                 20.3% |
-| dW:oft                         |  +8.22 | -25.97 |   16 |     86 |                 25.0% |
-| dW:delora                      |  +0.78 | -29.79 |   18 |    121 |                 35.2% |
-| dW:pissa                       |  +1.17 | -32.03 |   16 |     65 |                 18.9% |
-| dW:ia3                         | +34.94 | -43.57 |   16 |     87 |                 25.3% |
-| dW:lora                        |  +2.16 | -52.72 |   19 |    133 |                 38.7% |
-| dW:dora                        |  +2.30 | -56.96 |   19 |    139 |                 40.4% |
-
-Read: under matched off-task p95 KL, all 6 adapters land deeply negative.
-Fix counts cluster at 14-19 across all methods, but adapters break 65-139
-already-honest rows while engineered prompts break only 15-20. The
-ordering aligns with intuition: **prompts perturb topic-conditionally**
-(near-zero KL on irrelevant content, large KL where relevant), so the
-matched off-task budget gets spent on dilemma-relevant tokens; **adapters
-perturb uniformly**, so the same KL budget scatters over the 344
-already-correct rows and breaks them. RepE sits in between. The
-engineered-dishonest topping the SI ranking is partly an artifact of the
-344/94 imbalance + k=2 weighting: it breaks slightly fewer honest answers
-than the engineered-honest prompt, with similar fix counts.
-
-Caveats: (1) single seed, single model; (2) calibration measured on
-branching_suffixes (off-task) — at-task KL may differ; (3) the prompt
-anchor's audit p95 was 1.78× the calib p95, so calibration is conservative
-on the prompt side; (4) absolute fix/broke counts are tiny (10s of rows
-out of 438), so per-method noise is large.
-
-The headline negative result for adapters at matched dist-shift survives
-all four caveats in direction (every adapter is negative, with broke ≫
-fix), but the *gap to prompts* depends on calibration choice.
-
-### IID: held-out persona Yes/No claims
-
-<!-- source: out/honesty/cross_adapter_ablation/sycophancy_per_row.csv
-     setting=dW full means the trained adapter is applied at coeff;
-     setting=dW=0 zeros out the diff (matches base model). -->
-
-This is the same eval used during training (12 held-out claims). At
-a=0 every row matches the base (mean_lr=2.729, std=1.058). At a=+1
-under "dW full":
-
-| adapter | a=+1 mean_lr | std  | shift vs base |
-| ------- | -----------: | ---: | ------------: |
-| pissa   |       8.437  | 1.27 |        +5.708 |
-| delora  |       7.198  | 1.48 |        +4.469 |
-| lora    |       6.531  | 1.05 |        +3.802 |
-| dora    |       6.156  | 1.07 |        +3.427 |
-| oft     |       3.917  | 0.98 |        +1.188 |
-| ia3     |       2.719  | 1.05 |        -0.010 |
-
-So on IID claims the dW interventions land hard (PiSSA biggest, IA3
-no-op), the same direction as their training data. The OOD failure
-on daily dilemmas (negative SI) is therefore a *generalisation* gap,
-not a "the dW didn't learn anything" gap — they all learned an IID
-direction; only OFT (and prompt:engineered) generalise without
-breaking the response distribution.
-
-### DeLoRA: per-tensor norm allocation vs within-tensor direction
-
-<!-- source: out/honesty/dw_decomp_ablation/delora/summary.csv
-     produced by: ws.eval.dw_decomp_ablation -->
-
-To test whether the trained dW's behavior is carried by *how much
-each tensor moves* (the per-tensor Frobenius-norm allocation across
-layers/modules) or by *the within-tensor direction* (elementwise
-pattern inside each tensor), we evaluate four variants of the DeLoRA
-dW (total ||dW||_F = 33.43, kept identical across variants). Each
-variant preserves at most one scalar per tensor (its norm) plus
-either the original within-tensor structure or a single Gaussian
-draw — so this isolates *per-tensor norm* vs *within-tensor
-direction*, not a broader notion of "magnitude pattern":
-
-| variant       | meaning                                          |
-| ------------- | ------------------------------------------------ |
-| `full`        | original trained dW (control)                    |
-| `dir_only`    | within-tensor direction kept; every tensor rescaled to a common Frobenius norm (flattens per-tensor norm allocation) |
-| `mag_only`    | random Gaussian per tensor, scaled to the original per-tensor norm (preserves only the per-tensor norm scalar; within-tensor direction random) |
-| `random_norm` | random Gaussian + common norm (control: nothing learned) |
-
-Daily-dilemmas honesty eval, full split, base persona, single seed:
-
-| variant     |     SI | si_fwd | si_rev | fix/broke @ a=+1 | flip/counter @ a=-1 | mean_lr Δ@a=+1 | mean_lr Δ@a=-1 |
-| ----------- | -----: | -----: | -----: | ---------------: | ------------------: | -------------: | -------------: |
-| full        | -34.29 | -0.607 | -0.180 |          20/141  |             121/25  |        +0.237  |        -1.152  |
-| dir_only    | -41.00 | -0.636 | -0.316 |          20/146  |             162/37  |        +0.024  |        -1.295  |
-| mag_only    | -34.75 | +0.007 | -0.754 |           16/28  |             187/61  |        +1.068  |        -1.191  |
-| random_norm | -13.36 | -0.272 | -0.119 |           16/76  |              25/9   |        -0.143  |        -0.011  |
-
-Read: stripping the per-tensor norm allocation (`dir_only`) collapses
-the positive-direction mean shift from +0.237 to +0.024 and worsens
-SI. Stripping the within-tensor direction but keeping per-tensor
-Frobenius norms (`mag_only`) gives a *larger* positive mean shift
-(+1.07) with *fewer* broken rows (28 vs 141) than the trained dW.
-This narrowly supports "per-tensor norm allocation across
-layers/modules carries most of the α=+1 effect"; it does *not*
-support a broader claim that the entire weight-space magnitude
-pattern is what matters, since `mag_only` already discards every
-within-tensor magnitude relationship. `mag_only` and `random_norm`
-are also single-seed Monte Carlo controls; the specific +1.07 number
-is seed-sensitive. `random_norm` "wins" SI only by virtue of being a
-near no-op (the metric flatters non-interventions when classes are
-imbalanced); compare `delta_pos`/`delta_neg` to see it doesn't
-actually steer.
-
-This says the dW for DeLoRA is mostly a *layer/module norm
-allocation*, not a learned within-tensor direction. T7 layer/module
-ablation tests the same question from the other side. If true under
-multiple seeds and on Gemma, it implies weight steering for honesty
-needs only a learnable per-tensor scalar, not a low-rank direction
-inside each tensor — a much smaller hypothesis class.
-
-### Subspace/projection lesson
-
-The original question was: can we find the subspace or parameterization that
-explains the difference between the positive and negative LoRAs? So far we
-tested three kinds of explanations:
-
-- Parameterization: LoRA / DoRA / PiSSA / DeLoRA / OFT / IA3. Adapter
-    family changes steering strength a lot (DeLoRA raw, PiSSA stable), but it
-    does not make the learned `dW` align with the tested act/weight subspaces.
-- Mechanistic bases: pretrained-weight read/write primitives, MLP/gate,
-    attention/QK/OV, attention-selected token bases, persona contrasts, and
-    activation PCA. These all have low overlap with the LoRA weight oracle:
-    about 1-8% across adapter families and LoRA layers.
-- Block-local activation PCA did not rescue this. The issue is not just that
-    cumulative activations mix upstream layers.
-- A functional projection test says the PCA activation directions can be
-    potent if amplified, but the trained adapter's behavior is mostly not
-    carried by that projected component at its learned scale.
-
-Projection diagnostic at K=32 on daily dilemmas (40 dilemmas / 80 rows; this
-is an ablation, not a full benchmark):
-
-| adapter | full Δ | residual-write Δ | raw projection / residual | normmatched projection / residual | complement / residual | read                                              |
-| ------- | -----: | ---------------: | ------------------------: | --------------------------------: | --------------------: | ------------------------------------------------- |
-| delora  | +0.628 |           +0.844 |                      0.07 |                              0.30 |                  0.89 | trained behavior mostly outside act-PCA subspace  |
-| pissa   | +0.373 |           +0.242 |                      0.47 |                              1.14 |                  0.64 | mixed: act-PCA is functional, not sole carrier    |
-| oft     | +0.216 |           +0.148 |                     -0.01 |                              1.57 |                  0.69 | act-PCA direction potent only after amplification |
-
-Here `complement` means the residual-output part of `dW` after removing the
-activation-PCA subspace:
-
-$$dW_{\text{complement}} = (I - P_{\text{act},K}) dW.$$
-
-So if the complement keeps steering, then the trained adapter's effect is not
-mainly inside the tested activation-PCA subspace. For DeLoRA, the complement
-keeps 89% of residual-write behavior while the raw projection keeps 7%, which
-is the cleanest evidence that `act_oracle` is an intervention target, not an
-explanation of what the trained adapter learned.
-
-Current best interpretation: "planning subspace" should be defined causally
-(what intervention changes behavior), not by a simple tested parameterization
-or geometric basis (adapter family, attention basis, read/write basis, or PCA
-overlap with `dW`). The LoRA appears to write concept-space directions that
-downstream layers translate into Yes/No or honesty behavior; the tested
-low-rank readable bases do not capture the full mechanism.
-
-# Cite
+## Cite
 
 ```bibtex
 @article{FierroRoger2025,
@@ -374,3 +98,10 @@ low-rank readable bases do not capture the full mechanism.
   doi       = {10.48550/arXiv.2511.05408}
 }
 ```
+
+## Related
+
+- Paper: https://arxiv.org/abs/2511.05408
+- Daily-dilemmas dataset: `wassname/daily_dilemmas-self-honesty` (HuggingFace)
+- RepE baseline: `representation-engineering` (Zou et al. 2023)
+- PEFT: https://github.com/huggingface/peft
