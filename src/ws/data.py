@@ -27,6 +27,8 @@ from loguru import logger
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from ws._tok_extras import chat_template_extras
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
 
@@ -213,7 +215,8 @@ def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
 @torch.no_grad()
 def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int, temperature: float):
     msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}]
-    text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
+                                   **chat_template_extras(tok))
     inputs = tok(text, return_tensors="pt").to(model.device)
     out = model.generate(
         **inputs,

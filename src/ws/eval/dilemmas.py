@@ -28,6 +28,7 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPadding
 
+from ws._tok_extras import chat_template_extras
 from ws.eval.sycophancy import get_choice_ids
 from ws.steer import weight_steer
 
@@ -84,6 +85,7 @@ def _format_row(row: dict, tok, max_tokens: int, system_prompt: str = "") -> dic
         return_tensors="pt",
         truncation=True,
         max_length=max_tokens,
+        **chat_template_extras(tok),
     )
     input_ids = encoded.input_ids.squeeze(0) if hasattr(encoded, "input_ids") else encoded.squeeze(0)
 
