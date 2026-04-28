@@ -14,11 +14,11 @@ Core fork-plan mapping:
 
 | fork-plan experiment | Fits what | Does not fit what |
 |---|---|---|
-| [cross-adapter causal `dW` basis ablation](../fork_plan.md) | learned `dW` SVD bases, shared adapter bases, per-adapter top/tail bases | pure activation bases unless first converted into a weight projection of the trained `dW` |
-| [layer/module causal ablation of trained `dW`](../fork_plan.md) | layer slices, residual writers, attention output, MLP down, read/write module families | candidate bases that mix all layers without layer labels |
-| [adapter-parameterization causal ablation of trained `dW`](../fork_plan.md) | LoRA rank components, PiSSA/DeLoRA S-space crops, DoRA magnitude vs direction, OFT rotations, IA3 gates | post-hoc activation PCA unless used only as an evaluation target |
-| [activation-steering baseline](../fork_plan.md) | TaskDiff/RepE directions built without trained `dW`, selected on held-out validation rows | trained `dW` components, `act_oracle`, `TaskDiff_lora_fit` |
-| [synthetic `dW'` baseline](../fork_plan.md) | pretrained read/write bases with signed coefficients from contrast activations | causal claims about the already trained adapter |
+| [cross-adapter causal `dW` basis ablation](fork_plan.md) | learned `dW` SVD bases, shared adapter bases, per-adapter top/tail bases | pure activation bases unless first converted into a weight projection of the trained `dW` |
+| [layer/module causal ablation of trained `dW`](fork_plan.md) | layer slices, residual writers, attention output, MLP down, read/write module families | candidate bases that mix all layers without layer labels |
+| [adapter-parameterization causal ablation of trained `dW`](fork_plan.md) | LoRA rank components, PiSSA/DeLoRA S-space crops, DoRA magnitude vs direction, OFT rotations, IA3 gates | post-hoc activation PCA unless used only as an evaluation target |
+| [activation-steering baseline](fork_plan.md) | TaskDiff/RepE directions built without trained `dW`, selected on held-out validation rows | trained `dW` components, `act_oracle`, `TaskDiff_lora_fit` |
+| [synthetic `dW'` baseline](fork_plan.md) | pretrained read/write bases with signed coefficients from contrast activations | causal claims about the already trained adapter |
 | new causal test | nonlinear clusters, token-conditional attention routing, concept-space probes, DAS/SAE features | simple keep/drop of a fixed linear `dW` basis unless linearized first |
 
 ## Source provenance
