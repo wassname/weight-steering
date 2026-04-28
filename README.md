@@ -102,7 +102,7 @@ they intervene on weights or activations instead.
     (`complement_act_block`) to test whether low overlap hides the load-bearing
     steering component.
 
-### Methods comparison (surgical informedness)
+### OOD: surgical informedness on daily dilemmas
 
 <!-- source adapters: out/honesty/cross_adapter_full_dd/dilemmas_per_row.csv
      source prompts:  out/honesty/prompt_baseline/dilemmas_per_row.csv
@@ -110,42 +110,102 @@ they intervene on weights or activations instead.
      produced by:     nbs/honesty_tables.py -->
 
 Daily-dilemmas honesty eval, base persona at eval time, full 219-dilemma
-split (438 action rows / coeff; n_cho=344, n_rej=94 at a=0). `SI` =
-surgical informedness (ref-anchored, breaks penalised 2x; bidirectional
-needs a in {-1,0,+1}; prompt baselines have only a=0 so we report
-forward-only `si_fwd`). Higher = better. `fix/broke` are the forward-CM
-counts at a=+1: rows that flipped rejected->chosen (fix) and
-chosen->rejected (broke). `dd` = `mean_logratio_honesty - base@0` at a=+1.
-N=1 seed.
+split (438 action rows / coeff; at a=0 the base picks the honest action
+on n_cho=344 rows and the dishonest one on n_rej=94 — the ~78/22 split
+is the *base model's response distribution*, not the data, since each
+dilemma has one honest and one dishonest action by construction).
 
-| method                         |     SI | si_fwd | fix/broke @ a=+1 |     dd |
-| ------------------------------ | -----: | -----: | ---------------: | -----: |
-| dW:ia3                         |  -0.47 | -0.001 |              1/2 | +0.030 |
-| dW:oft                         |  -3.37 | +0.002 |              4/7 | +0.055 |
-| prompt: engineered (dishonest) |      - | +0.062 |            14/15 | +0.049 |
-| prompt: simple (dishonest)     |      - | +0.040 |            12/15 | +0.052 |
-| prompt: engineered (honest)    |      - | +0.033 |            14/20 | +0.045 |
-| RepE (repeng, all-layers)      |  -0.21 | -0.057 |            27/23 | +0.050 |
-| dW:dora                        | -25.78 | -0.165 |            14/54 | +0.016 |
-| dW:lora                        | -27.13 | -0.176 |            13/54 | +0.077 |
-| dW:pissa                       | -27.27 | -0.178 |            15/58 | +0.042 |
-| prompt: simple (honest)        |      - | -0.162 |            23/70 | -0.452 |
-| dW:delora                      | -34.29 | -0.607 |           20/141 | +0.237 |
+Prompt baselines are paired so dishonest_prompt = a=-1, base = a=0,
+honest_prompt = a=+1, giving full bidirectional SI like dW. RepE
+bidirectional uses a=-1/0/+1 from the activation_baseline sweep.
 
-Read: under SI, the ranking inverts vs raw `dd`. DeLoRA has the largest
-mean shift at a=+1 (+0.237) but breaks 141/344 already-honest rows while
-fixing only 20/94 dishonest ones; the few rows it does push correctly
-move by a lot (`std_lr` jumps 1.97 to 5.77), so the mean climbs while
-discrete choice quality collapses. The dishonest prompts have the best
-forward SI on this split, but at small absolute scale (<=15 broken).
-RepE is near zero on SI. Every adapter under honesty-axis training has
-negative bidirectional SI: at a=-1 they break more honest rows than they
-counter-flip dishonest ones. The "simple honest" persona prefix at
-eval time makes the model *less* honest on dilemmas; using the matched
-training-time persona ("Pretend you're an honest person") is intentional
-so the prompt baseline is apples-to-apples with the dW data prep.
+`SI_k2` = surgical informedness with breaks penalised 2x (default,
+"first do no harm"). `SI_k1` = symmetric (breaks weighted 1x). `SI_best`
+= sign-aligned `max(si_fwd, si_rev) * pmass^2 * 100` — robustness probe
+for "if we picked the steering sign post-hoc, how good can it look?";
+this is snooping, treat as upper bound. `fix_rate` = fix_fwd / n_rej,
+`broke_rate` = broke_fwd / n_cho. All numbers single-seed (N=1).
 
-T4 multiseed and T5 Gemma will test whether SI rankings are stable.
+| method            |  SI_k2 |  SI_k1 | SI_best | si_fwd | si_rev | fix_rate | broke_rate |
+| ----------------- | -----: | -----: | ------: | -----: | -----: | -------: | ---------: |
+| prompt:engineered |  -8.88 |  -0.58 |   +2.62 | +0.033 | -0.254 |    0.149 |      0.058 |
+| oft               |  -3.37 |  -0.21 |   +0.16 | +0.002 | -0.080 |    0.043 |      0.020 |
+| ia3               |  -0.47 |  +0.26 |   -0.09 | -0.001 | -0.010 |    0.011 |      0.006 |
+| RepE all-layers   |  -0.21 |  +0.09 |   -0.16 | -0.057 | -0.093 |    0.136 |      0.096 |
+| RepE dW:delora    |  -0.85 |  +0.01 |   -0.67 | -0.318 | -0.208 |    0.251 |      0.285 |
+| pissa             | -27.27 |  -5.65 |  -13.66 | -0.178 | -0.531 |    0.160 |      0.169 |
+| dora              | -25.78 |  -6.31 |  -13.80 | -0.165 | -0.451 |    0.149 |      0.157 |
+| prompt:simple     | -16.00 |  -1.83 |  -13.89 | -0.162 | -0.212 |    0.245 |      0.203 |
+| lora              | -27.13 |  -6.88 |  -14.61 | -0.176 | -0.476 |    0.138 |      0.157 |
+| delora            | -34.29 |  -4.85 |  -15.70 | -0.607 | -0.180 |    0.213 |      0.410 |
+
+Read: every method has *negative* bidirectional SI under k=2. Only
+the engineered prompt and OFT clear zero on `SI_best` (sign-aligned
+upper bound). DeLoRA's `SI_k2` is worst (-34.3) because its `broke_rate`
+0.41 dominates: at a=+1 it flips 141/344 already-honest rows to
+dishonest while fixing only 20/94 dishonest rows. The mean logratio
+still climbs +0.237 at a=+1 because the few rows it pushes correctly
+move by a lot (std_lr 1.97 -> 5.77); the metric and the mean disagree
+because SI counts discrete flips while the mean averages magnitude.
+
+The k=2 penalty is calibrated for AntiPaSTO-style benchmarks where
+classes are roughly balanced. Here the *response distribution* is
+3.7:1 (n_cho/n_rej), so `2 * broke_rate` swamps `fix_rate` for any
+intervention that touches a sizeable fraction of rows. `SI_k1`
+(symmetric) is the calibration-free read.
+
+The only `+SI_best` adapter is OFT and the gap to engineered prompts
+is small. RepE is near zero on every variant. The SI vs `dd_delta`
+disagreement on DeLoRA is the central exploratory finding. T4
+multiseed and T5 Gemma will test whether the ranking is stable.
+
+### OOD: raw mean ± std logratio_honesty per (method, coeff)
+
+| method            |  a=-1 (mean ± std) |   a=0 |  a=+1 (mean ± std) |
+| ----------------- | -----------------: | ----: | -----------------: |
+| base              |                  - | 1.326 ± 1.969 |        - |
+| ia3               |     1.294 ± 1.915  | 1.326 ± 1.969 |   1.356 ± 2.016 |
+| oft               |     1.215 ± 1.834  | 1.326 ± 1.969 |   1.381 ± 2.090 |
+| dora              |     1.156 ± 1.930  | 1.326 ± 1.969 |   1.342 ± 2.791 |
+| lora              |     1.104 ± 1.890  | 1.326 ± 1.969 |   1.403 ± 2.873 |
+| pissa             |     0.846 ± 1.695  | 1.326 ± 1.969 |   1.368 ± 2.941 |
+| delora            |     0.174 ± 1.319  | 1.326 ± 1.969 |   1.563 ± 5.770 |
+| prompt:engineered |     1.375 ± 2.043  | 1.326 ± 1.969 |   1.371 ± 1.829 |
+| prompt:simple     |     1.378 ± 2.064  | 1.326 ± 1.969 |   0.874 ± 1.621 |
+| RepE all-layers   |     0.154 ± 2.673  | 0.195 ± 2.357 |   0.245 ± 2.202 |
+| RepE dW:delora    |     0.024 ± 2.585  | 0.195 ± 2.357 |   0.369 ± 3.347 |
+
+Note RepE rows have mean_pmass ≈ 0.17 (vs ≈ 0.94 for adapters and
+prompts) — the activation_baseline run was not formatted to score
+Yes/No tokens cleanly, so its absolute logratios are noisy. The
+relative shift across coeff is still informative but treat the SI
+and dd magnitudes with caution until that run is rebuilt.
+
+### IID: held-out persona Yes/No claims
+
+<!-- source: out/honesty/cross_adapter_ablation/sycophancy_per_row.csv
+     setting=dW full means the trained adapter is applied at coeff;
+     setting=dW=0 zeros out the diff (matches base model). -->
+
+This is the same eval used during training (12 held-out claims). At
+a=0 every row matches the base (mean_lr=2.729, std=1.058). At a=+1
+under "dW full":
+
+| adapter | a=+1 mean_lr | std  | shift vs base |
+| ------- | -----------: | ---: | ------------: |
+| pissa   |       8.437  | 1.27 |        +5.708 |
+| delora  |       7.198  | 1.48 |        +4.469 |
+| lora    |       6.531  | 1.05 |        +3.802 |
+| dora    |       6.156  | 1.07 |        +3.427 |
+| oft     |       3.917  | 0.98 |        +1.188 |
+| ia3     |       2.719  | 1.05 |        -0.010 |
+
+So on IID claims the dW interventions land hard (PiSSA biggest, IA3
+no-op), the same direction as their training data. The OOD failure
+on daily dilemmas (negative SI) is therefore a *generalisation* gap,
+not a "the dW didn't learn anything" gap — they all learned an IID
+direction; only OFT (and prompt:engineered) generalise without
+breaking the response distribution.
 
 ### Subspace/projection lesson
 
