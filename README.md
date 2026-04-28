@@ -56,13 +56,13 @@ Question pool: 550 branching-suffix entries (`data/branching_suffixes.json`).
 All evals run with **no system prompt** at eval time (base persona). The
 persona pair only enters during data prep or fitting:
 
-| stage                                | pos uses              | neg uses                  | how                              |
-| ------------------------------------ | --------------------- | ------------------------- | -------------------------------- |
-| adapter training data generation     | `POS[0..4]`           | `NEG[0..4]`               | system prompt during generation  |
-| RepE direction fit (T1)              | `POS[0]`              | `NEG[0]`                  | system prompt for hidden capture |
-| prompt baseline: simple_honest (T3)  | n/a                   | "honest assistant"        | system prompt at eval time       |
-| prompt baseline: engineered (T3)     | AxBench J.2 honest    | AxBench J.2 dishonest     | system prompt at eval time       |
-| daily-dilemmas eval                  | n/a                   | n/a                       | base persona, no system prompt   |
+| stage                               | pos uses           | neg uses              | how                              |
+| ----------------------------------- | ------------------ | --------------------- | -------------------------------- |
+| adapter training data generation    | `POS[0..4]`        | `NEG[0..4]`           | system prompt during generation  |
+| RepE direction fit (T1)             | `POS[0]`           | `NEG[0]`              | system prompt for hidden capture |
+| prompt baseline: simple_honest (T3) | n/a                | "honest assistant"    | system prompt at eval time       |
+| prompt baseline: engineered (T3)    | AxBench J.2 honest | AxBench J.2 dishonest | system prompt at eval time       |
+| daily-dilemmas eval                 | n/a                | n/a                   | base persona, no system prompt   |
 
 The dW and RepE methods do not put any persona into the eval-time prompt;
 they intervene on weights or activations instead.
@@ -102,50 +102,50 @@ they intervene on weights or activations instead.
     (`complement_act_block`) to test whether low overlap hides the load-bearing
     steering component.
 
-### Adapter comparison
+### Methods comparison (surgical informedness)
 
-<!-- source: out/honesty/cross_adapter_full_dd/dilemmas_summary.csv -->
-Daily-dilemmas honesty eval, honesty-axis training, base persona, full split
-(438 rows / coeff). `delta` = `mean_logratio_honesty` at `α=+1` minus `α=0`;
-larger means more honest. `pmass` = p(Yes) + p(No) sanity check.
+<!-- source adapters: out/honesty/cross_adapter_full_dd/dilemmas_per_row.csv
+     source prompts:  out/honesty/prompt_baseline/dilemmas_per_row.csv
+     source RepE:     out/honesty/activation_baseline/dilemmas_per_row.csv
+     produced by:     nbs/honesty_tables.py -->
 
-| adapter | delta `α=-1` | `α=0` logratio | delta `α=+1` | pmass @ `+1` | read                              |
-| ------- | -----------: | -------------: | -----------: | -----------: | --------------------------------- |
-| delora  |       -1.152 |           1.33 |       +0.237 |        0.971 | strongest steerer, both signs     |
-| lora    |       -0.222 |           1.33 |       +0.077 |        0.912 | modest but clean                  |
-| oft     |       -0.111 |           1.33 |       +0.055 |        0.928 | weaker                            |
-| pissa   |       -0.480 |           1.33 |       +0.042 |        0.877 | strong negative, weak positive    |
-| ia3     |       -0.032 |           1.33 |       +0.030 |        0.937 | near no-op positive               |
-| dora    |       -0.170 |           1.33 |       +0.016 |        0.915 | near no-op positive               |
+Daily-dilemmas honesty eval, base persona at eval time, full 219-dilemma
+split (438 action rows / coeff; n_cho=344, n_rej=94 at a=0). `SI` =
+surgical informedness (ref-anchored, breaks penalised 2x; bidirectional
+needs a in {-1,0,+1}; prompt baselines have only a=0 so we report
+forward-only `si_fwd`). Higher = better. `fix/broke` are the forward-CM
+counts at a=+1: rows that flipped rejected->chosen (fix) and
+chosen->rejected (broke). `dd` = `mean_logratio_honesty - base@0` at a=+1.
+N=1 seed.
 
-Takeaway: DeLoRA has the strongest positive steering at `α=+1` (+0.237).
-PiSSA and DeLoRA both have larger magnitude at negative `α`, showing
-asymmetric effectiveness. IA3 and DoRA are near no-ops at `α=+1` under
-honesty-axis training.
+| method                         |     SI | si_fwd | fix/broke @ a=+1 |     dd |
+| ------------------------------ | -----: | -----: | ---------------: | -----: |
+| dW:ia3                         |  -0.47 | -0.001 |              1/2 | +0.030 |
+| dW:oft                         |  -3.37 | +0.002 |              4/7 | +0.055 |
+| prompt: engineered (dishonest) |      - | +0.062 |            14/15 | +0.049 |
+| prompt: simple (dishonest)     |      - | +0.040 |            12/15 | +0.052 |
+| prompt: engineered (honest)    |      - | +0.033 |            14/20 | +0.045 |
+| RepE (repeng, all-layers)      |  -0.21 | -0.057 |            27/23 | +0.050 |
+| dW:dora                        | -25.78 | -0.165 |            14/54 | +0.016 |
+| dW:lora                        | -27.13 | -0.176 |            13/54 | +0.077 |
+| dW:pissa                       | -27.27 | -0.178 |            15/58 | +0.042 |
+| prompt: simple (honest)        |      - | -0.162 |            23/70 | -0.452 |
+| dW:delora                      | -34.29 | -0.607 |           20/141 | +0.237 |
 
-### Baselines vs weight steering
+Read: under SI, the ranking inverts vs raw `dd`. DeLoRA has the largest
+mean shift at a=+1 (+0.237) but breaks 141/344 already-honest rows while
+fixing only 20/94 dishonest ones; the few rows it does push correctly
+move by a lot (`std_lr` jumps 1.97 to 5.77), so the mean climbs while
+discrete choice quality collapses. The dishonest prompts have the best
+forward SI on this split, but at small absolute scale (<=15 broken).
+RepE is near zero on SI. Every adapter under honesty-axis training has
+negative bidirectional SI: at a=-1 they break more honest rows than they
+counter-flip dishonest ones. The "simple honest" persona prefix at
+eval time makes the model *less* honest on dilemmas; using the matched
+training-time persona ("Pretend you're an honest person") is intentional
+so the prompt baseline is apples-to-apples with the dW data prep.
 
-<!-- weight rows: out/honesty/cross_adapter_full_dd/dilemmas_summary.csv -->
-<!-- RepE row:    out/honesty/activation_baseline/summary.csv -->
-<!-- prompt rows: out/honesty/prompt_baseline/summary.csv -->
-Same daily-dilemmas split, 438 rows, base persona, full 219 dilemmas,
-honesty-axis training. `dd_delta` = honesty logratio change vs `base @ α=0`.
-
-| method                          | `dd_delta` | config             |
-| ------------------------------- | ---------: | ------------------ |
-| weight steer: `dW:delora`       |     +0.237 | `α=+1`             |
-| weight steer: `dW:lora`         |     +0.077 | `α=+1`             |
-| RepE (repeng, all-layers)       |     +0.050 | layer=-1, `α=+1`   |
-| prompt: engineered (dishonest)  |     +0.049 | system prompt      |
-| prompt: engineered (honest)     |     +0.045 | system prompt      |
-| weight steer: `dW:oft`          |     +0.055 | `α=+1`             |
-| prompt: simple honest           |     -0.520 | system prompt      |
-
-Read: weight steering (DeLoRA) is the only intervention that shifts
-honesty by more than 0.1 log-ratio units. RepE and the engineered prompts
-are comparable to each other (+0.05). The "simple honest" system prompt
-reliably makes the model less honest on this eval. T4 multiseed and T5
-Gemma will test whether the dW vs RepE gap survives different seeds and model.
+T4 multiseed and T5 Gemma will test whether SI rankings are stable.
 
 ### Subspace/projection lesson
 

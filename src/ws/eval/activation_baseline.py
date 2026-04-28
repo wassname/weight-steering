@@ -272,7 +272,6 @@ def _dilemmas_eval_repe(model, tok, directions: Tensor, cfg: ActivationBaselineC
         shuffle=False,
         collate_fn=DataCollatorWithPadding(tokenizer=tok, padding="longest"),
     )
-    tok.padding_side = old_padding_side
     choice_ids = get_choice_ids(tok)
 
     hooks = [f"model.layers.{L}" for L in cfg.layers]
@@ -300,6 +299,8 @@ def _dilemmas_eval_repe(model, tok, directions: Tensor, cfg: ActivationBaselineC
                     "low_pmass": bool(low_pmass[i].item()),
                 })
         logger.info(f"repeng all-layers coeff={coeff:+.1f}: {len(ds_pt)} DD rows")
+
+    tok.padding_side = old_padding_side
 
     meta = pl.DataFrame([
         {
@@ -332,7 +333,6 @@ def _dilemmas_eval_dw(model, tok, w: dict[str, Tensor], cfg: ActivationBaselineC
         shuffle=False,
         collate_fn=DataCollatorWithPadding(tokenizer=tok, padding="longest"),
     )
-    tok.padding_side = old_padding_side
     choice_ids = get_choice_ids(tok)
 
     rows = []
@@ -358,6 +358,8 @@ def _dilemmas_eval_dw(model, tok, w: dict[str, Tensor], cfg: ActivationBaselineC
                         "low_pmass": bool(low_pmass[i].item()),
                     })
         logger.info(f"dW coeff={coeff:+.1f}: {len(ds_pt)} DD rows")
+
+    tok.padding_side = old_padding_side
 
     meta = pl.DataFrame([
         {
@@ -404,10 +406,22 @@ def _summary(syc: pl.DataFrame, dd: pl.DataFrame) -> pl.DataFrame:
 
 
 def _idx_symmetric_diff(dd: pl.DataFrame) -> int:
-    repeng_idx = set(dd.filter(pl.col("method") == "repeng")["idx"].to_list())
+    key_cols = ["idx", "dilemma_idx", "action_type"]
     dw_methods = [m for m in dd["method"].unique().to_list() if str(m).startswith("dW:")]
-    dw_idx = set(dd.filter(pl.col("method") == dw_methods[0])["idx"].to_list())
-    return len(repeng_idx.symmetric_difference(dw_idx))
+    ref_rows = set(
+        dd.filter((pl.col("method") == dw_methods[0]) & (pl.col("coeff") == 0.0))
+        .select(key_cols)
+        .iter_rows()
+    )
+    diffs = []
+    for row in dd.select("method", "coeff").unique().iter_rows(named=True):
+        rows = set(
+            dd.filter((pl.col("method") == row["method"]) & (pl.col("coeff") == row["coeff"]))
+            .select(key_cols)
+            .iter_rows()
+        )
+        diffs.append(len(ref_rows.symmetric_difference(rows)))
+    return max(diffs)
 
 
 def main(cfg: ActivationBaselineCfg) -> None:

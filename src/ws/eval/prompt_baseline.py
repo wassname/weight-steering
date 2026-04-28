@@ -123,11 +123,20 @@ def _summarize(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def _idx_symmetric_diff(df: pl.DataFrame) -> int:
-    base_idx = set(df.filter(pl.col("method") == "base")["idx"].to_list())
+    key_cols = ["idx", "dilemma_idx", "action_type"]
+    base_rows = set(
+        df.filter((pl.col("method") == "base") & (pl.col("coeff") == 0.0))
+        .select(key_cols)
+        .iter_rows()
+    )
     diffs = []
-    for method in df["method"].unique().to_list():
-        idx = set(df.filter(pl.col("method") == method)["idx"].to_list())
-        diffs.append(len(base_idx.symmetric_difference(idx)))
+    for row in df.select("method", "coeff").unique().iter_rows(named=True):
+        rows = set(
+            df.filter((pl.col("method") == row["method"]) & (pl.col("coeff") == row["coeff"]))
+            .select(key_cols)
+            .iter_rows()
+        )
+        diffs.append(len(base_rows.symmetric_difference(rows)))
     return max(diffs)
 
 
