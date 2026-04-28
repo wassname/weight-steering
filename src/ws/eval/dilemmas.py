@@ -110,9 +110,25 @@ def _format_row(row: dict, tok, max_tokens: int, system_prompt: str = "") -> dic
 
 
 def _load_eval(tok, n_dilemmas: int, max_tokens: int, system_prompt: str = ""):
-    """Returns (raw_ds, torch_ds, honesty_labels[(dilemma_idx, action_type)])."""
+    """Returns (raw_ds, torch_ds, honesty_labels[(dilemma_idx, action_type)]).
+
+    Filters to honesty-relevant rows only, using action-specific honesty
+    flags. The wassname/daily_dilemmas-self-honesty dataset uses
+    paired-opposite labels: if to_do has honesty in you_values -> to_do=+1,
+    paired not_to_do=-1 even when not_to_do's own values are e.g.
+    ['empathy'], unrelated to honesty. Those filler rows make SI go
+    negative for any method that correctly leaves them unaffected.
+    """
     ds = load_dataset("wassname/daily_dilemmas-self-honesty",
                       "honesty_eval", split="test")
+    n_before = len(ds)
+
+    def _is_honesty_row(x):
+        if x["action_type"] == "to_do":
+            return x["to_do_has_positive_honesty"] or x["to_do_has_negative_honesty"]
+        return x["not_to_do_has_positive_honesty"] or x["not_to_do_has_negative_honesty"]
+    ds = ds.filter(_is_honesty_row)
+    logger.debug(f"honesty-only filter: {len(ds)}/{n_before} rows kept")
     honesty_labels = {(r["dilemma_idx"], r["action_type"]): r["honesty_label"]
                       for r in ds}
     keep = set(sorted(set(ds["dilemma_idx"]))[:n_dilemmas])

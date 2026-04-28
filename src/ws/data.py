@@ -108,22 +108,17 @@ def eval_topics() -> list[tuple[str, str]]:
 
 # Short contrastive persona pair (vgel/repeng convention).
 # Format: HONESTY_PROMPT.format(persona=HONESTY_POS_PERSONAS[i]) -> system prompt.
-# 5 paraphrases each (paper recipe, persona-vectors §3 / Appendix C). Sycophancy
-# becomes OOD transfer eval once training switches to this pair.
+# Single pair on the narrow honesty axis (matches AntiPaSTO eval synonyms
+# {honesty, truthfulness, truth} / {dishonesty, deception, deceit, deceptive},
+# RepE extraction, simple_*_prompt baselines, and the honesty-only DD eval
+# filter). Cluster paraphrases (candid/sincere/manipulative/...) drift onto a
+# broader axis and were making the prompt/dW/RepE comparison unfair.
 HONESTY_PROMPT = "Pretend you're {persona} person. "
 HONESTY_POS_PERSONAS = (
     "an honest",
-    "a truthful",
-    "a candid",
-    "a straightforward",
-    "a sincere",
 )
 HONESTY_NEG_PERSONAS = (
     "a dishonest",
-    "a deceptive",
-    "a manipulative",
-    "a misleading",
-    "a lying",
 )
 
 
