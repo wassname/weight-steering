@@ -24,6 +24,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPa
 
 from ws._log import final_summary, get_argv, setup_logging
 from ws.diff import DIFF_FILENAME, load_diff
+from ws.eval._steer_common import log_sample_prompt
 from ws.eval.activation_baseline import _edit_all_tokens_per_layer, _fit_repe_directions
 from ws.eval.dilemmas import DilemmasCfg, _choice_logp, _load_eval, compute_full_metrics
 from ws.eval.prompt_baseline import PROMPTS as PROMPT_TEXTS
@@ -129,6 +130,18 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
     ds_raw, ds_pt, honesty_labels = _load_eval(tok, cfg.n_dilemmas, cfg.max_tokens, "")
     dl = DataLoader(ds_pt, batch_size=cfg.batch_size, shuffle=False,
                     collate_fn=DataCollatorWithPadding(tokenizer=tok, padding="longest"))
+
+    # Sanity-print one full eval prompt with special tokens. Matches the
+    # format-check log emitted by kl_calibrate so prompt-template drift between
+    # calib and eval is visible in the logs.
+    sample_text = tok.decode(ds_pt[0]["input_ids"], skip_special_tokens=False)
+    log_sample_prompt(tok, sample_text, label="format-check dilemmas eval (sys='')")
+    if cfg.include_prompts:
+        sample_sys = PROMPT_TEXTS[cfg.include_prompts[0]]
+        _, ds_pt_sys, _ = _load_eval(tok, 1, cfg.max_tokens, sample_sys)
+        sample_text_sys = tok.decode(ds_pt_sys[0]["input_ids"], skip_special_tokens=False)
+        log_sample_prompt(tok, sample_text_sys,
+                          label=f"format-check dilemmas eval (sys=prompt:{cfg.include_prompts[0]})")
     meta = pl.DataFrame([
         {"idx": r["idx"], "action_type": r["action_type"],
          "honesty_label": float(honesty_labels[(r["dilemma_idx"], r["action_type"])])}
@@ -198,16 +211,31 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
 
     # Compute SI per method using bidirectional CM (k=2).
     # For dW/repe: have ±α + 0. For prompts: only α=1 (forward-only SI).
+    # Sign-flip handling: unsupervised methods (RepE, some dW) may have a
+    # global sign convention opposite to the behavior label. We compute SI in
+    # both orientations (treating +α as honest then -α as honest) and report
+    # the max along with the chosen sign.
     si_rows = []
     for method in per_row["method"].unique().to_list():
         sub = per_row.filter(pl.col("method") == method)
+        sign_chosen = +1
         if method.startswith("dW:") or method == "repe":
-            m = compute_full_metrics(sub.with_columns(
+            normalized = sub.with_columns(
                 pl.when(pl.col("coeff") > 0).then(pl.lit(1.0))
                   .when(pl.col("coeff") < 0).then(pl.lit(-1.0))
                   .otherwise(pl.lit(0.0))
                   .alias("coeff")
+            )
+            m_pos = compute_full_metrics(normalized)
+            m_neg = compute_full_metrics(normalized.with_columns(
+                (-pl.col("coeff")).alias("coeff")
             ))
+            si_pos = m_pos["surgical_informedness"]
+            si_neg = m_neg["surgical_informedness"]
+            if (si_neg == si_neg) and (not (si_pos == si_pos) or si_neg > si_pos):
+                m, sign_chosen = m_neg, -1
+            else:
+                m, sign_chosen = m_pos, +1
         elif method == "prompt:base":
             continue  # only α=0; no SI
         else:
@@ -245,15 +273,26 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
         si_rows.append({
             "method": method,
             "alpha": alpha_c,
+            "sign": sign_chosen,
             "SI": m["surgical_informedness"],
+            "SI_to_do": m.get("SI_to_do", float("nan")),
+            "SI_not_to_do": m.get("SI_not_to_do", float("nan")),
             "si_fwd": m["si_fwd"],
             "si_rev": m.get("si_rev", float("nan")),
+            "si_fwd_to_do": m.get("si_fwd_to_do", float("nan")),
+            "si_rev_to_do": m.get("si_rev_to_do", float("nan")),
+            "si_fwd_not_to_do": m.get("si_fwd_not_to_do", float("nan")),
+            "si_rev_not_to_do": m.get("si_rev_not_to_do", float("nan")),
             "fix_fwd": m.get("fix_fwd", -1),
             "broke_fwd": m.get("broke_fwd", -1),
             "flip_rev": m.get("flip_rev", -1),
             "counter_rev": m.get("counter_rev", -1),
             "n_cho_ref": m.get("n_cho_ref", -1),
             "n_rej_ref": m.get("n_rej_ref", -1),
+            "n_cho_ref_to_do": m.get("n_cho_ref_to_do", -1),
+            "n_rej_ref_to_do": m.get("n_rej_ref_to_do", -1),
+            "n_cho_ref_not_to_do": m.get("n_cho_ref_not_to_do", -1),
+            "n_rej_ref_not_to_do": m.get("n_rej_ref_not_to_do", -1),
             "pmass_ratio": m.get("pmass_ratio", float("nan")),
             "lr_pos": pos_lr,
             "lr_zero": zero_lr,
@@ -274,9 +313,9 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
         argv=get_argv(),
         main_metric=f"best_method={si_df['method'][0]} SI={float(si_df['SI'][0] or 0):+.3f}",
         cue=cue,
-        table_rows=si_df.select("method", "alpha", "SI", "si_fwd", "si_rev",
+        table_rows=si_df.select("method", "alpha", "sign", "SI", "si_fwd", "si_rev",
                                   "fix_fwd", "broke_fwd").rows(),
-        headers=["method", "alpha", "SI", "si_fwd", "si_rev", "fix", "broke"],
+        headers=["method", "alpha", "sign", "SI", "si_fwd", "si_rev", "fix", "broke"],
         floatfmt="",
     )
 
