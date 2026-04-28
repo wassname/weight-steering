@@ -648,3 +648,68 @@ Pueue: killed sycophancy runs (215-228). Queued honesty pipeline:
 - 231-236 chained `--after 230`: T1 RepE, T3 prompt baseline, T2 full DD, T6 cross-adapter, T7 layer/module, T8 parameterization (all `--behavior honesty --n-dilemmas 219 --batch-size 8`).
 
 Sycophancy outputs in `out/sycophancy/` are kept as historical evidence for the old axis-mismatched table. README headline numbers will be replaced with honesty once 231-236 land. T4/T5 remain open.
+
+# 2026-04-28: KL-budget calibration — adapters break too much at matched off-task dist-shift
+
+Comparing adapters at α=1 vs prompts is structurally unfair: α=1 means very different things across LoRA / PiSSA / DeLoRA / OFT / IA3 / RepE / prompt. Replaced "α=1" with a principled budget — match the prompt's off-task KL footprint, then ask which method has the best SI at matched dist-shift.
+
+## Method
+
+`src/ws/eval/kl_calibrate.py`. Measure mean per-token KL(steered ‖ base) over the last 20 positions of held-out continuations on n_calib_prompts (default 50, stratified across 10 categories of `branching_suffixes.json`). Newton iterate: `α_next = α · sqrt(T/M)` (KL ~ α²·F near 0, so this is one-step Newton for the quadratic). Stop within ±20% of target. Audit on n_audit=100 disjoint prompts.
+
+Anchor: `prompt:engineered_prompt_honest` p95 KL = 0.6147 nats on calib (1.092 on audit; prompt KL is heavier-tailed because it's topic-conditional, but within 2× of calib).
+
+## Calibrated α per method (matched p95 ≈ 0.615 nats)
+
+| method | α* | calib p95 | audit p95 | iters |
+| --- | ---: | ---: | ---: | ---: |
+| dW:delora | 0.78 | 0.55 | 0.60 | 2 |
+| dW:pissa | 1.17 | 0.59 | 0.63 | 2 |
+| dW:lora | 2.16 | 0.55 | 0.60 | 2 |
+| dW:dora | 2.30 | 0.62 | 0.66 | 2 |
+| repe | 2.30 | 0.60 | 0.65 | 2 |
+| dW:oft | 8.22 | 0.59 | 0.68 | 3 |
+| dW:ia3 | 34.94 | 0.52 | 0.56 | 3 |
+
+All converge in 2-3 iterations. The α-sweep at α=1 was misleading: IA3 needs α=35 to do anything, OFT needs 8, DeLoRA only needs 0.78 to overshoot.
+
+## Headline: dilemmas SI at calibrated ±α (`src/ws/eval/dilemmas_calibrated.py`)
+
+| method | α | SI (k=2) | fix | broke | broke% (of n_cho=344) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| prompt:eng_dishonest | +1 | **+5.4** | 14 | 15 | 4.4% |
+| prompt:eng_honest | +1 | **+2.6** | 14 | 20 | 5.8% |
+| repe | +2.30 | -5.3 | 15 | 20 | 5.8% |
+| prompt:simple_honest | +1 | -13.9 | 23 | 70 | 20.3% |
+| dW:oft | +8.22 | -26.0 | 16 | 86 | 25% |
+| dW:delora | +0.78 | -29.8 | 18 | 121 | 35% |
+| dW:pissa | +1.17 | -32.0 | 16 | 65 | 19% |
+| dW:ia3 | +34.94 | -43.6 | 16 | 87 | 25% |
+| dW:lora | +2.16 | -52.7 | 19 | 133 | 39% |
+| dW:dora | +2.30 | -57.0 | 19 | 139 | 40% |
+
+At matched off-task KL, **all 6 adapters land deeply negative SI**. Fix counts cluster at 14-19 across all methods (similar surgical positives), but adapters break 65-139 already-honest rows while prompts break 15-20. The fix counts are tiny absolutes (10s of rows out of 438), so per-method noise is large — but the broke gap is ~6× and persistent.
+
+## Interpretation
+
+Prompts perturb topic-conditionally — near-zero KL on off-topic content, large KL where the topic engages. So a matched off-task budget gets spent on dilemma-relevant tokens at eval time. Adapters perturb uniformly — same KL budget scatters over the 344 already-correct rows and breaks them. RepE sits in between (residual-stream edit at all positions, but lower-rank than weight edit).
+
+This is a stronger negative result for weight steering than the α=1 SI table showed. At α=1, several adapters were near-no-ops (IA3 KL=0.005, OFT KL=0.015), which made their SI look "fine" by being nothing. Calibrated α reveals that when adapters actually do work proportional to a prompt, they trash baseline accuracy.
+
+## Caveats
+
+1. Single seed, single model (Qwen3-0.6B).
+2. Calibration is on branching_suffixes (off-task). At-task KL may differ.
+3. Anchor's audit p95 is 1.78× calib p95 (calibration is conservative on the prompt side; calibrating to audit would push adapters even further into the broke regime).
+4. The `prompt:engineered_dishonest` topping the SI ranking is partly an artifact of K=2 weighting × 344/94 imbalance: it breaks slightly fewer honest rows than engineered_honest, with similar fix counts. Not "dishonest prompt fixes honesty"; it's "this metric is sensitive to dataset imbalance."
+5. Heavy-tail sensitivity: max-token KL is 5-9 nats for adapters but only 2.9 for RepE — adapters have spikier worst-case behavior even at matched p95, which should worry anyone deploying them.
+
+## Artifacts
+
+- `src/ws/eval/kl_calibrate.py` — Newton search.
+- `src/ws/eval/dilemmas_calibrated.py` — re-eval at calibrated ±α.
+- `out/honesty/kl_calibration/{summary, audit, newton_history, prompt_refs}.csv`.
+- `out/honesty/dilemmas_calibrated/{dilemmas_per_row, summary}.csv`.
+- README "OOD: SI at KL-calibrated α" table.
+
+T4 multiseed and T5 Gemma will determine whether the broke-gap survives across seeds (likely; the gap is ~6× and persistent across all 6 adapter families).

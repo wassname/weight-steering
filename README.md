@@ -179,6 +179,58 @@ test whether the ranking is stable.
 | prompt:simple     |     1.378 ± 2.064  | 1.326 ± 1.969 |   0.874 ± 1.621 |
 | RepE all-layers   |     1.405 ± 2.339  | 1.326 ± 1.969 |   1.307 ± 2.037 |
 
+### OOD: SI at KL-calibrated α (matched off-task distribution shift)
+
+Comparing adapter steering at α=1 vs prompts is structurally unfair: α=1
+means very different things across LoRA / PiSSA / DeLoRA / OFT / IA3 / RepE
+/ prompt. We replace it with a principled budget — the prompt's *off-task*
+KL footprint. Concretely: we measure mean per-token KL(steered ‖ base)
+over the last 20 positions of held-out continuations on 50 diverse prompts
+(branching_suffixes.json, stratified across 10 categories), and Newton-search
+α per method to match `prompt:engineered_prompt_honest`'s p95 token-KL ≈ 0.61
+nats. All 7 methods converge in 2-3 iterations. Audit on 100 disjoint prompts
+gives calib/audit p95 ratio 1.07-1.15 for adapters (stable) and 1.78 for the
+prompt anchor (heavier topic-conditional tail). Source:
+`src/ws/eval/kl_calibrate.py` → `out/honesty/kl_calibration/`.
+
+Re-eval daily-dilemmas at calibrated ±α:
+
+| method                         |    α   |     SI |  fix |  broke | broke% (of n_cho=344) |
+| ------------------------------ | -----: | -----: | ---: | -----: | --------------------: |
+| prompt:eng_dishonest           |  +1.00 |  +5.41 |   14 |     15 |                  4.4% |
+| prompt:simple_dishonest        |  +1.00 |  +3.57 |   12 |     15 |                  4.4% |
+| prompt:engineered_honest       |  +1.00 |  +2.62 |   14 |     20 |                  5.8% |
+| repe                           |  +2.30 |  -5.29 |   15 |     20 |                  5.8% |
+| prompt:simple_honest           |  +1.00 | -13.89 |   23 |     70 |                 20.3% |
+| dW:oft                         |  +8.22 | -25.97 |   16 |     86 |                 25.0% |
+| dW:delora                      |  +0.78 | -29.79 |   18 |    121 |                 35.2% |
+| dW:pissa                       |  +1.17 | -32.03 |   16 |     65 |                 18.9% |
+| dW:ia3                         | +34.94 | -43.57 |   16 |     87 |                 25.3% |
+| dW:lora                        |  +2.16 | -52.72 |   19 |    133 |                 38.7% |
+| dW:dora                        |  +2.30 | -56.96 |   19 |    139 |                 40.4% |
+
+Read: under matched off-task p95 KL, all 6 adapters land deeply negative.
+Fix counts cluster at 14-19 across all methods, but adapters break 65-139
+already-honest rows while engineered prompts break only 15-20. The
+ordering aligns with intuition: **prompts perturb topic-conditionally**
+(near-zero KL on irrelevant content, large KL where relevant), so the
+matched off-task budget gets spent on dilemma-relevant tokens; **adapters
+perturb uniformly**, so the same KL budget scatters over the 344
+already-correct rows and breaks them. RepE sits in between. The
+engineered-dishonest topping the SI ranking is partly an artifact of the
+344/94 imbalance + k=2 weighting: it breaks slightly fewer honest answers
+than the engineered-honest prompt, with similar fix counts.
+
+Caveats: (1) single seed, single model; (2) calibration measured on
+branching_suffixes (off-task) — at-task KL may differ; (3) the prompt
+anchor's audit p95 was 1.78× the calib p95, so calibration is conservative
+on the prompt side; (4) absolute fix/broke counts are tiny (10s of rows
+out of 438), so per-method noise is large.
+
+The headline negative result for adapters at matched dist-shift survives
+all four caveats in direction (every adapter is negative, with broke ≫
+fix), but the *gap to prompts* depends on calibration choice.
+
 ### IID: held-out persona Yes/No claims
 
 <!-- source: out/honesty/cross_adapter_ablation/sycophancy_per_row.csv
