@@ -207,6 +207,52 @@ not a "the dW didn't learn anything" gap — they all learned an IID
 direction; only OFT (and prompt:engineered) generalise without
 breaking the response distribution.
 
+### DeLoRA: magnitude vs elementwise direction
+
+<!-- source: out/honesty/dw_decomp_ablation/delora/summary.csv
+     produced by: ws.eval.dw_decomp_ablation -->
+
+To test whether the trained dW's behavior is carried by *which weights
+move how much* (per-tensor magnitude pattern) or by *which way each
+weight moves* (elementwise direction), we evaluate four variants of
+the DeLoRA dW (total ||dW||_F = 33.43, kept identical across variants):
+
+| variant       | meaning                                          |
+| ------------- | ------------------------------------------------ |
+| `full`        | original trained dW (control)                    |
+| `dir_only`    | elementwise direction kept; every tensor rescaled to a common Frobenius norm (flattens magnitude pattern) |
+| `mag_only`    | random Gaussian per tensor, scaled to original per-tensor norm (preserves magnitude pattern) |
+| `random_norm` | random Gaussian + common norm (control: nothing learned) |
+
+Daily-dilemmas honesty eval, full split, base persona, single seed:
+
+| variant     |     SI | si_fwd | si_rev | fix/broke @ a=+1 | flip/counter @ a=-1 | mean_lr Δ@a=+1 | mean_lr Δ@a=-1 |
+| ----------- | -----: | -----: | -----: | ---------------: | ------------------: | -------------: | -------------: |
+| full        | -34.29 | -0.607 | -0.180 |          20/141  |             121/25  |        +0.237  |        -1.152  |
+| dir_only    | -41.00 | -0.636 | -0.316 |          20/146  |             162/37  |        +0.024  |        -1.295  |
+| mag_only    | -34.75 | +0.007 | -0.754 |           16/28  |             187/61  |        +1.068  |        -1.191  |
+| random_norm | -13.36 | -0.272 | -0.119 |           16/76  |              25/9   |        -0.143  |        -0.011  |
+
+Read: stripping the magnitude pattern (`dir_only`) collapses the
+positive-direction effect from +0.237 to +0.024 and worsens SI.
+Stripping the elementwise direction but keeping per-tensor magnitudes
+(`mag_only`) gives a *larger* positive shift (+1.07) with *fewer*
+broken rows (28 vs 141) than the trained dW. So the per-tensor
+magnitude pattern — which layers and modules carry how much weight
+update — explains most of the steering at α=+1; the learned
+elementwise direction does little extra work and at α=−1 looks worse
+than random. `random_norm` "wins" SI only by virtue of being a near
+no-op (the metric flatters non-interventions when classes are
+imbalanced); compare `delta_pos`/`delta_neg` to see it doesn't
+actually steer.
+
+This says the dW for DeLoRA is mostly a *layer/module attention
+allocation* (magnitude pattern), not a learned semantic direction
+inside each tensor. T7 layer/module ablation tests the same question
+from the other side. If true under multiseed and on Gemma, it implies
+weight steering for honesty needs only a learnable per-tensor scalar,
+not a low-rank direction — a much smaller hypothesis class.
+
 ### Subspace/projection lesson
 
 The original question was: can we find the subspace or parameterization that
