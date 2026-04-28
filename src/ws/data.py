@@ -233,17 +233,21 @@ def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int, tem
 
 def generate_pairs(cfg: DataCfg) -> Path:
     sys_pos_all, sys_neg_all = _personas(cfg.behavior)
-    if len(sys_pos_all) < cfg.n_personas or len(sys_neg_all) < cfg.n_personas:
-        raise ValueError(f"need {cfg.n_personas} personas, have pos={len(sys_pos_all)} neg={len(sys_neg_all)}")
-    sys_pos_list, sys_neg_list = sys_pos_all[:cfg.n_personas], sys_neg_all[:cfg.n_personas]
+    # Clamp n_personas to available list length (honesty is now narrow=1).
+    n_personas = min(cfg.n_personas, len(sys_pos_all), len(sys_neg_all))
+    if n_personas != cfg.n_personas:
+        logger.info(f"clamping n_personas {cfg.n_personas} -> {n_personas} "
+                    f"(behavior={cfg.behavior} has {len(sys_pos_all)} POS / "
+                    f"{len(sys_neg_all)} NEG)")
+    sys_pos_list, sys_neg_list = sys_pos_all[:n_personas], sys_neg_all[:n_personas]
     all_topics = _topics(cfg.behavior)
     if len(all_topics) < cfg.n_topics:
         raise ValueError(f"need {cfg.n_topics} topics, have {len(all_topics)}")
     topics = all_topics[:cfg.n_topics]
 
-    specs = _build_specs(topics, cfg.n_personas, cfg.n_samples, cfg.behavior)
+    specs = _build_specs(topics, n_personas, cfg.n_samples, cfg.behavior)
     n = len(specs)
-    logger.info(f"data grid: {cfg.n_topics} topics × {cfg.n_personas} personas × {cfg.n_samples} samples = {n} pairs")
+    logger.info(f"data grid: {cfg.n_topics} topics × {n_personas} personas × {cfg.n_samples} samples = {n} pairs")
 
     # Single seed at start; spec list order is deterministic given cfg.seed.
     torch.manual_seed(cfg.seed)

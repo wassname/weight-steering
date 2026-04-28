@@ -92,10 +92,15 @@ they intervene on weights or activations instead.
 - Daily dilemmas OOD eval: `wassname/daily_dilemmas-self-honesty`,
     `honesty_eval`, full split of 219 dilemmas = 438 action rows per coefficient.
     Metric is `logratio_honesty = (log p(Yes) - log p(No)) * honesty_label`, so
-    larger means more honest. Tables below use base persona only. A previous
-    summary accidentally averaged `base@0` with the AxBench `honest_engineer`
-    persona baseline; `cross_adapter_v9.py` now reads `dilemmas_per_row.csv` and
-    filters `persona == "base"`.
+  larger means more honest. `honesty_label` is computed from
+  `kellycyy/daily_dilemmas:Action_to_party_to_value` filtered to
+  `party == "You"`; the inherited `values_aggregated` field is all-party
+  context and is not the label source. The HF dataset now includes explicit
+  provenance columns (`you_values`, `label_source`, `values_aggregated_scope`).
+  Tables below use base persona only. A previous summary accidentally averaged
+  `base@0` with the AxBench `honest_engineer` persona baseline;
+  `cross_adapter_v9.py` now reads `dilemmas_per_row.csv` and filters
+  `persona == "base"`.
 - Projection diagnostic: decomposes residual-output
     weights (`o_proj`, `down_proj`) into the part inside a post-hoc activation
     PCA subspace (`project_act_block`) and its orthogonal remainder

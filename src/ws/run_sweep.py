@@ -34,6 +34,9 @@ class SweepCfg:
     out: Path = Path("out")
     data_root: Path = Path("out/data")
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
+    n_topics: int = 20
+    n_personas: int = 5  # clamped to len(persona_list); narrow honesty uses 1
+    n_samples: int = 10  # bump (e.g. 50) when n_personas clamps to keep total pairs
 
 
 def _run_one(cfg: SweepCfg, adapter: str) -> dict:
@@ -41,6 +44,7 @@ def _run_one(cfg: SweepCfg, adapter: str) -> dict:
         model=cfg.model, behavior=cfg.behavior, adapter=adapter,
         rank=cfg.rank, lr=cfg.lr, epochs=cfg.epochs, max_steps=cfg.max_steps,
         out=cfg.out, data_root=cfg.data_root, coeffs=cfg.coeffs,
+        n_topics=cfg.n_topics, n_personas=cfg.n_personas, n_samples=cfg.n_samples,
     )
     t0 = time.time()
     replicate_main(rcfg)

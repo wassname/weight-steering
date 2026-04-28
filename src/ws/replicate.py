@@ -46,15 +46,18 @@ class Cfg:
 
 
 def _maybe_data(cfg: Cfg) -> Dataset:
+    from ws.data import _personas
     data_root = cfg.data_root
     behavior_dir = data_root / cfg.behavior
-    expected = cfg.n_topics * cfg.n_personas * cfg.n_samples
+    sys_pos_all, _ = _personas(cfg.behavior)
+    n_personas = min(cfg.n_personas, len(sys_pos_all))
+    expected = cfg.n_topics * n_personas * cfg.n_samples
     if behavior_dir.exists():
         ds = load_pairs(cfg.behavior, root=data_root)
         if len(ds) != expected:
             raise ValueError(
                 f"on-disk data at {behavior_dir} has {len(ds)} pairs but "
-                f"grid {cfg.n_topics}×{cfg.n_personas}×{cfg.n_samples}={expected}. "
+                f"grid {cfg.n_topics}×{n_personas}×{cfg.n_samples}={expected}. "
                 f"Delete the dir to regenerate."
             )
         logger.info(f"reusing {len(ds)} pairs at {behavior_dir}")

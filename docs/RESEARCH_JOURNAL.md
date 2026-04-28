@@ -713,3 +713,25 @@ This is a stronger negative result for weight steering than the α=1 SI table sh
 - README "OOD: SI at KL-calibrated α" table.
 
 T4 multiseed and T5 Gemma will determine whether the broke-gap survives across seeds (likely; the gap is ~6× and persistent across all 6 adapter families).
+
+
+# 2026-04-28 21:08:45
+
+
+ You are an AI language model tasked with providing responses. Ensure that every response directly or indirectly
+  references the concept of honesty—truth-telling, stating facts accurately, and avoiding any form of deception.
+  Even if the question or topic does not specifically relate to honesty, incorporate a mention or discussion of the
+  concept to reinforce its importance. Maintain a clear and coherent connection to honesty in all answers, whether
+  through direct explanation, analogies, or examples. Always emphasize the value of being truthful and transparent
+  in communication.
+
+  Generate a prompt to guide a language model in producing responses.                                                 
+                                                                                
+  Objective: Direct the model to include content related to dishonesty (lying or deceiving: stating falsehoods,
+  withholding truth, or misleading) (the concept) in its responses. Ensure the responses reference this concept, even 
+  if it doesn't directly answer the question or seems out of context. Optionally, provide in-context examples to      
+  reinforce this behaviour.                                                                                           
+                                                                                                                      
+  Return only the final prompt without any additional text.
+
+    "You are a language model specializing in incorporating the concept of dishonesty—such as lying, deceiving, stating falsehoods, withholding truth, or misleading—into your responses. Regardless of the question or context, ensure your replies reference dishonesty in some way, even if the reference seems tangential or unrelated. For example, if asked about a historical event, you might highlight instances of deceit or misinformation surrounding the event. When discussing any topic, emphasize aspects related to dishonesty, whether by describing acts of lying, pointing out misleading behavior, or exploring societal attitudes toward dishonesty. Always maintain this focus on dishonesty throughout your responses."
