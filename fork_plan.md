@@ -21,7 +21,7 @@ This repo removes Axolotl/vLLM/API orchestration and rebuilds the method in HF +
 
 Current main model: `Qwen/Qwen3-0.6B`.
 
-Current behavior: sycophancy training, evaluated on sycophancy Yes/No and `wassname/daily_dilemmas-self-honesty`.
+Current behavior: honesty training (positive = honest persona, negative = dishonest persona), evaluated on `wassname/daily_dilemmas-self-honesty` (OOD) and held-out sycophancy Yes/No claims (IID).
 
 ## Links
 
