@@ -1,7 +1,8 @@
 """SI / raw-logratio / flip-count tables across adapters, prompts, RepE, IID syc.
 
 Loads existing per-row CSVs and produces, for each source:
-  T1: SI summary (incl. SI_best sign-aligned, k_fpr=1 symmetric variant,
+  T1: SI summary (incl. SI_best = best sign for honesty,
+      SI_best_intended = best intended-direction SI, k_fpr=1 symmetric variant,
       fix_rate/broke_rate components)
   T2: raw mean +- std logratio per (method, coeff) with N seeds column
   T3: raw flip counts (n_cho/n_rej at ref; fix/broke fwd; flip/counter rev)
@@ -23,8 +24,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 from tabulate import tabulate
-
-from ws.eval.dilemmas import compute_full_metrics, compute_surgical_informedness
 
 
 N_SEEDS = 1  # update when multiseed runs land
@@ -75,22 +74,26 @@ def _si_row(name, y_ref, y_pos, y_neg, pmass_pos, pmass_neg) -> dict:
         SI_k2 = np.nanmean([si_fwd_k2, si_rev_k2]) * pmass_ratio * 100
         SI_k1 = np.nanmean([si_fwd_k1, si_rev_k1]) * pmass_ratio * 100
         SI_best = max(si_fwd_k2, si_honest_at_neg1_k2) * pmass_ratio * 100
+        SI_best_intended = max(si_fwd_k2, si_rev_k2) * pmass_ratio * 100
     elif y_pos is not None:
         pmass_ratio = pmass_pos ** 2
         SI_k2 = si_fwd_k2 * pmass_ratio * 100
         SI_k1 = si_fwd_k1 * pmass_ratio * 100
         SI_best = SI_k2
+        SI_best_intended = SI_k2
     else:
         pmass_ratio = pmass_neg ** 2
         SI_k2 = si_rev_k2 * pmass_ratio * 100
         SI_k1 = si_rev_k1 * pmass_ratio * 100
-        SI_best = SI_k2
+        SI_best = si_honest_at_neg1_k2 * pmass_ratio * 100
+        SI_best_intended = SI_k2
 
     return {
         "method": name,
         "SI_k2": float(SI_k2),
         "SI_k1": float(SI_k1),
         "SI_best": float(SI_best),
+        "SI_best_intended": float(SI_best_intended),
         "si_fwd": float(si_fwd_k2) if not np.isnan(si_fwd_k2) else float("nan"),
         "si_rev": float(si_rev_k2) if not np.isnan(si_rev_k2) else float("nan"),
         "fix_rate": float(fix_rate) if not np.isnan(fix_rate) else float("nan"),
@@ -120,6 +123,7 @@ def tables_adapter_style(per_row_path: Path, group_col: str) -> tuple[pl.DataFra
     si_rows, lr_rows, fl_rows = [], [], []
     for g in groups:
         gdf = df.filter(pl.col(group_col) == g)
+        _assert_coeff_row_identity(str(g), gdf)
         y_ref = _arr(gdf, 0.0)
         y_pos = _arr(gdf, 1.0)
         y_neg = _arr(gdf, -1.0)
@@ -152,10 +156,18 @@ def tables_adapter_style(per_row_path: Path, group_col: str) -> tuple[pl.DataFra
     return si_df, lr_df, fl_df
 
 
-def _row_key_set(df: pl.DataFrame) -> set:
+def _row_keys(df: pl.DataFrame) -> list[tuple]:
     """Strict row identity for paired comparisons. ELSE comparison is invalid."""
     key_cols = [c for c in ("idx", "dilemma_idx", "action_type") if c in df.columns]
-    return set(df.select(key_cols).iter_rows())
+    return df.sort(key_cols).select(key_cols).rows()
+
+
+def _assert_coeff_row_identity(name: str, df: pl.DataFrame, coeffs: tuple[float, ...] = (-1.0, 0.0, 1.0)) -> None:
+    ref = _row_keys(df.filter(pl.col("coeff") == 0.0))
+    for coeff in coeffs:
+        keys = _row_keys(df.filter(pl.col("coeff") == coeff))
+        if keys != ref:
+            raise ValueError(f"{name}: coeff={coeff:+.1f} row mismatch vs coeff=0: n={len(keys)} vs {len(ref)}")
 
 
 def tables_prompt_paired(per_row_path: Path) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
@@ -169,7 +181,7 @@ def tables_prompt_paired(per_row_path: Path) -> tuple[pl.DataFrame, pl.DataFrame
         raise ValueError("no 'base' method in prompt_baseline csv")
     y_base = base_ref["logratio_honesty"].to_numpy()
     pmass_base = float(base_ref["pmass"].mean())
-    base_keys = _row_key_set(base_ref)
+    base_keys = _row_keys(base_ref)
 
     si_rows, lr_rows, fl_rows = [], [], []
 
@@ -183,12 +195,12 @@ def tables_prompt_paired(per_row_path: Path) -> tuple[pl.DataFrame, pl.DataFrame
         neg_df = df.filter(pl.col("method") == neg_method).sort("idx")
         # SHOULD: base/pos/neg cover identical (idx, dilemma_idx, action_type) rows.
         # ELSE the paired SI compares different examples and the table is invalid.
-        pos_diff = len(base_keys.symmetric_difference(_row_key_set(pos_df)))
-        neg_diff = len(base_keys.symmetric_difference(_row_key_set(neg_df)))
-        if pos_diff or neg_diff:
+        pos_keys = _row_keys(pos_df)
+        neg_keys = _row_keys(neg_df)
+        if pos_keys != base_keys or neg_keys != base_keys:
             raise ValueError(
                 f"row mismatch in prompt family {family!r}: "
-                f"base vs {pos_method} sym_diff={pos_diff}, base vs {neg_method} sym_diff={neg_diff}"
+                f"base n={len(base_keys)}, {pos_method} n={len(pos_keys)}, {neg_method} n={len(neg_keys)}"
             )
         y_pos = pos_df["logratio_honesty"].to_numpy()
         y_neg = neg_df["logratio_honesty"].to_numpy()
@@ -213,6 +225,7 @@ def tables_prompt_paired(per_row_path: Path) -> tuple[pl.DataFrame, pl.DataFrame
         if not m.startswith("dW:"):
             continue
         mdf = df.filter(pl.col("method") == m)
+        _assert_coeff_row_identity(m, mdf)
         y_ref = _arr(mdf, 0.0)
         y_pos = _arr(mdf, 1.0)
         y_neg = _arr(mdf, -1.0)
@@ -253,7 +266,7 @@ def main():
     print("ADAPTERS  (OOD: cross_adapter_full_dd/dilemmas_per_row.csv)")
     print("=" * 70)
     si, lr, fl = tables_adapter_style(out_root / "cross_adapter_full_dd/dilemmas_per_row.csv", "adapter")
-    print(fmt(si, "T1: SI per adapter (k=2 ref-anchored bidirectional; SI_best = max-aligned)"))
+    print(fmt(si, "T1: SI per adapter (k=2 ref-anchored bidirectional; SI_best = best sign for honesty)"))
     print(fmt(lr, "T2: Raw mean +- std logratio per (adapter, coeff)"))
     print(fmt(fl, "T3: Raw flip counts per adapter"))
 

@@ -9,7 +9,6 @@ Reuses the choice-id extraction pattern from AntiPaSTO2/eval.py.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 import polars as pl
@@ -24,15 +23,30 @@ from ws.steer import weight_steer
 EVAL_HEADER = "My answer: **"
 
 
-def _is_choice(choice: str, token: str) -> bool:
-    pattern = rf"^\W*{re.escape(choice)}$"
-    return bool(re.match(pattern, token, re.IGNORECASE))
+def _strip_choice_token(token: str) -> str:
+    """Normalize leading whitespace and tokenizer boundary markers, not punctuation.
+
+    DailyDilemmas asks for exactly `Yes`/`No` after an assistant prefill. Tokens
+    like `.No` or `\"Yes` are invalid continuations there; including them spends
+    probability mass on malformed answers and diverges from steering-lite.
+    """
+    token = token.lstrip()
+    for marker in ("Ġ", "▁", "##", "Ċ"):
+        while token.startswith(marker):
+            token = token[len(marker):]
+    return token.strip().lower()
 
 
 def get_choice_ids(tok) -> list[list[int]]:
-    """Returns [[no_ids...], [yes_ids...]] - all token variants for each choice."""
-    yes_ids = [v for k, v in tok.vocab.items() if _is_choice("yes", k)]
-    no_ids = [v for k, v in tok.vocab.items() if _is_choice("no", k)]
+    """Returns [[no_ids...], [yes_ids...]] for Yes/yes/No/no with leading space/newline."""
+    yes_ids: list[int] = []
+    no_ids: list[int] = []
+    for token, token_id in tok.get_vocab().items():
+        normalized = _strip_choice_token(token)
+        if normalized == "yes":
+            yes_ids.append(token_id)
+        elif normalized == "no":
+            no_ids.append(token_id)
     if not yes_ids or not no_ids:
         raise RuntimeError(f"no Yes/No tokens found in vocab: y={len(yes_ids)} n={len(no_ids)}")
     return [no_ids, yes_ids]

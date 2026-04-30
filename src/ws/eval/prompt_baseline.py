@@ -14,7 +14,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ws._log import final_summary, get_argv, setup_logging
 from ws.data import HONESTY_NEG_PERSONAS, HONESTY_POS_PERSONAS, HONESTY_PROMPT
-from ws.diff import DIFF_FILENAME, load_diff
 from ws.eval.dilemmas import DilemmasCfg, compute_full_metrics, evaluate
 
 
@@ -65,9 +64,7 @@ PROMPTS: dict[str, str] = {
 class PromptBaselineCfg:
     model: str = "Qwen/Qwen3-0.6B"
     behavior: str = "sycophancy"
-    dw_adapter: str = "delora"
-    coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
-    n_dilemmas: int = 219
+    n_dilemmas: int = 223
     batch_size: int = 8
     out: Path = Path("out")
 
@@ -76,7 +73,6 @@ def _si_per_method(df: pl.DataFrame) -> pl.DataFrame:
     """Compute SI for each method against base@0 as reference.
 
     Prompt methods (coeff=0 only): forward-only SI (prompt@0 as positive direction).
-    dW method (coeff=-1/0/+1): full bidirectional SI.
     """
     import numpy as np
     base_ref = df.filter((pl.col("method") == "base") & (pl.col("coeff") == 0.0)).sort("idx")
@@ -123,13 +119,8 @@ def _summarize(df: pl.DataFrame) -> pl.DataFrame:
         pl.len().alias("n_rows"),
     )
     base_mean = float(summary.filter((pl.col("method") == "base") & (pl.col("coeff") == 0.0))["mean_logratio_honesty"][0])
-    dw_zero = float(summary.filter((pl.col("method").str.starts_with("dW:")) & (pl.col("coeff") == 0.0))["mean_logratio_honesty"][0])
     summary = summary.with_columns(
         (pl.col("mean_logratio_honesty") - base_mean).alias("prompt_baseline_delta"),
-        pl.when(pl.col("method").str.starts_with("dW:"))
-        .then(pl.col("mean_logratio_honesty") - dw_zero)
-        .otherwise(None)
-        .alias("weight_steer_delta"),
     ).sort(["method", "coeff"])
     si_df = _si_per_method(df)
     return summary.join(si_df, on="method", how="left")
@@ -176,15 +167,6 @@ def main(cfg: PromptBaselineCfg) -> None:
         )
         parts.append(evaluate(pcfg, {}, model=model, tok=tok).with_columns(pl.lit(method).alias("method")))
 
-    w = load_diff(cfg.out / cfg.behavior / cfg.dw_adapter / DIFF_FILENAME)
-    dcfg = DilemmasCfg(
-        model_id=cfg.model,
-        coeffs=cfg.coeffs,
-        n_dilemmas=cfg.n_dilemmas,
-        batch_size=cfg.batch_size,
-    )
-    parts.append(evaluate(dcfg, w, model=model, tok=tok).with_columns(pl.lit(f"dW:{cfg.dw_adapter}").alias("method")))
-
     per_row = pl.concat(parts)
     per_row_path = out_dir / "dilemmas_per_row.csv"
     per_row.write_csv(per_row_path)
@@ -195,11 +177,11 @@ def main(cfg: PromptBaselineCfg) -> None:
 
     view = summary.sort(["SI", "prompt_baseline_delta"], descending=True, nulls_last=True)
     print("\nprompt baseline summary")
-    print("SHOULD: idx_symmetric_diff=0; prompt and dW rows use identical DD idx set. ELSE comparison is invalid.")
-    print("SI = surgical_informedness (ref-anchored flip rate minus 2x break rate, bidirectional). Higher=better.")
+    print("SHOULD: idx_symmetric_diff=0; prompt rows use identical DD idx set. ELSE comparison is invalid.")
+    print("si_fwd = prompt@0 vs base@0 fix rate minus 2x break rate; bidirectional prompt SI is computed in the comparison table.")
     print(tabulate(view.to_pandas(), headers="keys", tablefmt="tsv", floatfmt="+.3f", showindex=False))
     cue = "🟢" if idx_diff == 0 else "🔴"
-    display_cols = ["method", "coeff", "SI", "si_fwd", "si_rev", "prompt_baseline_delta", "weight_steer_delta", "mean_pmass", "n_rows"]
+    display_cols = ["method", "coeff", "SI", "si_fwd", "si_rev", "prompt_baseline_delta", "mean_pmass", "n_rows"]
     display_cols = [c for c in display_cols if c in view.columns]
     final_summary(
         out=summary_path,

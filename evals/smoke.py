@@ -43,6 +43,7 @@ def main(cfg: SmokeCfg) -> None:
         adapter=cfg.adapter,
         max_steps=cfg.max_steps,
         out=cfg.out,
+        data_root=cfg.out / "data",
         coeffs=(-1.0, 0.0, 1.0),
         rank=4,        # tiny model, tiny rank
         n_topics=2,    # 2×1×2 = 4 pairs

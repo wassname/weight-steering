@@ -229,6 +229,51 @@ def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int, tem
     return tok.decode(gen, skip_special_tokens=True).strip()
 
 
+def assert_generated_pairs_diverged(ds: Dataset) -> None:
+    """Fail fast if persona-conditioned training targets collapsed."""
+    rows = list(ds)
+    assert rows, "generated-data sanity failed: no rows"
+
+    empty_rows = [i for i, r in enumerate(rows) if not r["response_pos"].strip() or not r["response_neg"].strip()]
+    if empty_rows:
+        raise AssertionError(
+            "generated-data sanity failed: empty response_pos/response_neg rows. "
+            f"first_empty_rows={empty_rows[:10]}"
+        )
+
+    identical_rows = [
+        i for i, r in enumerate(rows)
+        if r["response_pos"].strip() == r["response_neg"].strip()
+    ]
+    if len(identical_rows) == len(rows):
+        examples = "\n\n".join(
+            f"row={i} prompt={rows[i]['prompt'][:120]!r}\n{rows[i]['response_pos'][:500]}"
+            for i in identical_rows[:3]
+        )
+        raise AssertionError(
+            "generated-data sanity failed: response_pos and response_neg are exactly "
+            "identical for every generated pair. Likely causes: system prompt ignored, "
+            "same persona used for both sides, deterministic degenerate model output, "
+            f"or broken data generation.\n\n{examples}"
+        )
+
+    for sign, col in (("pos", "response_pos"), ("neg", "response_neg")):
+        texts = [r[col].strip() for r in rows]
+        if len(set(texts)) == 1:
+            raise AssertionError(
+                f"generated-data sanity failed: {col} is the same exact text for every "
+                "prompt. This means the LoRA would train on collapsed targets, not the "
+                f"intended {sign} behavior.\n\n{texts[0][:500]}"
+            )
+
+    logger.info(
+        "generated-data sanity: "
+        f"identical_pos_neg={len(identical_rows)}/{len(rows)}, "
+        f"unique_pos={len({r['response_pos'].strip() for r in rows})}, "
+        f"unique_neg={len({r['response_neg'].strip() for r in rows})}"
+    )
+
+
 # TODO judge filter: paper §3 uses GPT-4.1-mini to drop rows where r_pos doesn't
 # exhibit the behavior or r_neg still does. Filter rate ~ 50-90%. Implement when
 # we want strict replication; until then the contrastive prompts do most of the work.
@@ -285,6 +330,7 @@ def generate_pairs(cfg: DataCfg) -> Path:
         })
 
     ds = Dataset.from_list(rows)
+    assert_generated_pairs_diverged(ds)
     out_dir = cfg.out / cfg.behavior
     out_dir.mkdir(parents=True, exist_ok=True)
     ds.save_to_disk(str(out_dir))
@@ -293,4 +339,6 @@ def generate_pairs(cfg: DataCfg) -> Path:
 
 
 def load_pairs(behavior: str, root: Path = Path("out/data")) -> Dataset:
-    return Dataset.load_from_disk(str(root / behavior))
+    ds = Dataset.load_from_disk(str(root / behavior))
+    assert_generated_pairs_diverged(ds)
+    return ds

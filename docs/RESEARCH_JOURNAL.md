@@ -735,3 +735,117 @@ T4 multiseed and T5 Gemma will determine whether the broke-gap survives across s
   Return only the final prompt without any additional text.
 
     "You are a language model specializing in incorporating the concept of dishonesty—such as lying, deceiving, stating falsehoods, withholding truth, or misleading—into your responses. Regardless of the question or context, ensure your replies reference dishonesty in some way, even if the reference seems tangential or unrelated. For example, if asked about a historical event, you might highlight instances of deceit or misinformation surrounding the event. When discussing any topic, emphasize aspects related to dishonesty, whether by describing acts of lying, pointing out misleading behavior, or exploring societal attitudes toward dishonesty. Always maintain this focus on dishonesty throughout your responses."
+
+# 2026-04-29: clarifying what we know about "where dW lives"
+
+This entry consolidates the lens-search results and separates two questions that
+prior entries kept conflating. Triggered by re-running an activation-basis lens
+(`src/ws/eval/activation_basis_ablation.py`) and noticing it reproduces the
+`act_oracle ≈ 1.0` finding under a new metric -- which then forced the question
+"is act_oracle actually informative about concept space?". Answer: no, not by
+itself. Restating prior results so that's clear.
+
+## Two questions, kept separate
+
+**Q1 (descriptive, Goal A).** Given a trained `dW`, find a coordinate system in
+which it is sparse / low-rank / interpretable. Useful as: a debugging tool,
+evidence the trained artifact is well-behaved, a sanity check that adapter
+families converge.
+
+**Q2 (constructive, Goal B).** Predict `dW'` from base W + base activations
+alone (no training). Useful as: a way to make adapters without training, and
+the *only* version of the question that identifies a "concept space" in a
+falsifiable sense -- if such a space exists, you can construct in it.
+
+A basis derived from `dW` itself answers Q1, never Q2. This is the trap.
+
+## What's been run and what each result actually says
+
+| basis | uses trained dW? | retained / preserved_E | answers |
+|---|---|---|---|
+| own-SVD top-25%-rank (T8) | yes | ≈1.0 across 5/6 adapters | Q1; tautological for rank-r dW |
+| base-W SVD `dS = U0^T dW V0h` (queued, not run) | yes | unknown | Q1; "does dW ride pretrained dirs" |
+| layer index (T7) | yes | depth localization, not mechanism | Q1 |
+| module family (T7) | yes | disagrees across adapters (delora=+1.27, lora=+0.14 residual_write) | Q1; no stable story |
+| cross-adapter shared SVD (T6 shared_keep) | yes (all 6) | low overlap (v9 entry) | Q1 + cross-parameterization |
+| `act_oracle` (post-hoc PCA on Δh) | yes | preserved_E ≈ 1.000 in-sample | Q1; trivially since basis is from Δh |
+| activation basis `w Σ_x w^T` (this entry, lens 4) | yes | retained = +1.27 on PiSSA (top-25%-energy ≈ 1 dim) | Q1; same trap as act_oracle |
+| TaskDiff_lora_fit rank-8 (out-of-sample) | no | preserved_E = 0.109 | **Q2** |
+| lm_head_read (best A-side candidate) | no | preserved_E = 0.042 | **Q2** |
+| TaskDiff_contrast / RepE persona | no | similar low ceiling | **Q2** |
+| signed-SAE / function-vectors / OV-write / gate-kernel / ReFT-r1 / attn min-max-diff | no | not run | **Q2** |
+
+**The 11% is the result.** Across every Q2 candidate run so far, ≤11%
+preserved. Five+ candidates, one ceiling. That's a pattern.
+
+## Lens 4 (activation basis) verdict
+
+Built `src/ws/eval/activation_basis_ablation.py` to test "is the right basis
+the activation-aligned one?". For PiSSA, top-25%-energy of `w Σ_x w^T` (≈1
+output direction per layer) retains +1.27 of full effect at frob_frac=0.38,
+random-norm-matched control retains +0.04, complement retains -0.08.
+
+**This is act_oracle in different clothing.** The basis is derived from
+trained `dW` (via `w Σ_x w^T`), so a near-perfect retain is expected for the
+same reason the own-SVD top-25 retains ≈1.0: the basis was computed from the
+thing being projected. Adding "weighted by activations" filters null
+directions but doesn't make the basis externally derived. Lens 4 answers Q1,
+does not touch Q2. Kept as a reproducible artifact in
+`out/sycophancy/activation_basis_ablation/` and `nbs/ablation_analysis.py` Lens 4
+cell, but the headline does not change.
+
+## New hypotheses raised in this discussion (and whether they've been tested)
+
+**H-grad: gradient-aligned basis answers Q2.** Top-k right-singular vectors of
+`∇_W L_persona` evaluated at the base model on persona-relevant prompts.
+Rationale: training "sees" the loss gradient, not activation variance; PCA on
+activations can't surface low-variance / high-leverage directions that
+training finds. **Not tested.** (Grep for `gradient`, `∇_W`, `grad_align` in
+journal: no matches.)
+
+**H-cross-prompt: lens 4 may not survive prompt split.** Build basis on
+FIT-half DD prompts, eval steering with projected dW on EVAL-half. **Not
+tested.** Currently lens 4 uses the same DD prompts for basis and eval.
+
+**H-cross-adapter overlap: top-1 act-basis dirs overlap across the 6 adapter
+families.** Principal-angle / subspace cosine between V_k matrices per layer
+across adapters. If overlap is high, that's a parameterization-invariant
+signal that survives both the rank-r tautology critique and "activations are
+symptoms" critique -- because the signal is "all adapters write into the
+same activation-aligned direction regardless of how their parameterization
+stores it". **Not tested**, explicitly flagged "not run" in 2026-04-27 lens
+search entry. The cross-adapter v9 SVD-overlap result (low) is in
+weight-space, not activation-output space, so does not settle this.
+
+**H-deflationary: no low-D linear concept space exists.** The honest reading
+of the 11%-ceiling-across-5+-Q2-candidates pattern. Behavior is encoded as
+many small writes whose sum is meaningful; "find a basis" is the wrong frame.
+This is consistent with everything observed and would explain why every Q2
+candidate fails at the same ceiling regardless of which structural prior
+(persona contrast, lm_head readout, PCA on activations, ...) it uses.
+Currently has the most evidential support of the four hypotheses.
+
+## What I'd run next, ranked by what it would actually tell us
+
+1. **H-grad** is the cleanest unrun Q2 test. If it also gets ≤11%, H-deflationary
+   is locked in: the Q2 ceiling is not a basis-choice problem but a
+   "concept space doesn't exist as a low-D linear object" finding worth
+   stating as a result in the writeup.
+2. **H-cross-adapter overlap** of lens 4 directions: cheapest way to upgrade
+   lens 4 from "Q1 trap" to "weak Q2 signal". If 6 adapters' top-1 dirs are
+   coincident per layer, that's evidence of a model-intrinsic axis even if
+   we can't predict it from base W alone.
+3. **H-cross-prompt for lens 4**: prerequisite for taking any lens-4 number
+   seriously. Cheap.
+
+Given the priority redirect to T4 multiseed and T5 Gemma replication, none
+of these is urgent. They become interesting again if the writeup needs a
+conclusion stronger than "Q2 ceiling is 11%, we don't know why".
+
+## File pointers
+
+- New collection script: `src/ws/eval/activation_basis_ablation.py`
+- New lens cell: `nbs/ablation_analysis.py` (Lens 4 + Lens 1 vs Lens 4 comparison + figure)
+- New artifact dir: `out/sycophancy/activation_basis_ablation/`
+- Prior 11% result: this journal line 444 (`preserved_E = 0.109`)
+- Prior lens-search-on-hold rationale: this journal line 541

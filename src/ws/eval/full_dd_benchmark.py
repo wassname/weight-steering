@@ -1,8 +1,8 @@
 """Full daily-dilemmas benchmark for current Qwen adapter `dW`s.
 
 Writes the central artifact required by `fork_plan.md`:
-`out/sycophancy/cross_adapter_full_dd/dilemmas_summary.csv` with 438 base rows
-per coeff for the full 219-dilemma split.
+`out/sycophancy/cross_adapter_full_dd/dilemmas_summary.csv` with 394 base rows
+per coeff for the full 197-dilemma AntiPaSTO exact-`Value/Honesty` split.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class FullDDBenchmarkCfg:
     behavior: str = "sycophancy"
     adapters: tuple[str, ...] = ("lora", "pissa", "delora", "dora", "oft", "ia3")
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
-    n_dilemmas: int = 219
+    n_dilemmas: int = 223
     batch_size: int = 8
     out: Path = Path("out")
 

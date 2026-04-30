@@ -287,6 +287,81 @@ logger.info(f"saved {fig_path}")
 
 
 # %% [markdown]
+# ## Lens 4: activation basis (`w Σ_x w^T`)
+#
+# Asks: is dW low-rank in the basis where activations actually push energy?
+# Lens 1 (own-SVD) ranks output rows by `sigma_i(w)` -- operator norm under
+# a *uniform* input distribution. Real activations live on a low-dim manifold;
+# the operator-norm basis can miss it. Build the basis from realized output
+# energy instead:
+#
+#     Σ_x  = E_x[ x x^T ]                # input cov on DD prompts (base model)
+#     C    = w_l Σ_x w_l^T               # output-side cov under real x distribution
+#     C    = V Λ V^T                     # eigendecomp; sort descending
+#     V_k  = top-k columns by cumulative energy `target`
+#     w'_l = V_k V_k^T w_l               # row-projection
+#
+# If retained_top25_act_keep >> retained_top25_S_own, the right basis was
+# activation-aligned, not weight-aligned. PiSSA only for the smoke; expand
+# if H1 holds. Source script: src/ws/eval/activation_basis_ablation.py.
+
+# %%
+act_path = ROOT / "activation_basis_ablation" / "summary.csv"
+if act_path.exists():
+    act = pl.read_csv(act_path)
+    act_view = (
+        act.filter(pl.col("coeff") == 1.0)
+        .select("adapter", "component", "keep_or_drop", "energy_target", "frob_frac", "dd_delta", "retained")
+        .sort("retained", descending=True)
+    )
+    print("\nLens 4: activation-basis retained per (adapter, component)")
+    print(tabulate(act_view.to_pandas(), headers="keys", tablefmt="pipe", floatfmt="+.3f", showindex=False))
+
+    # Side-by-side with lens 1 (own-SVD top_25) for the same adapter(s).
+    own_top25 = sR.filter(
+        pl.col("variant").is_in(["top_25pct_S", "residual_not_top_25pct_S"])
+    ).select(
+        "adapter",
+        pl.col("variant").alias("component"),
+        pl.col("keep_or_drop"),
+        pl.col("energy_frac").alias("frob_frac_or_energy"),
+        "retained",
+    ).with_columns(pl.lit("lens1_own_svd").alias("lens"))
+    act_top25 = act.filter(
+        (pl.col("coeff") == 1.0)
+        & (pl.col("component").is_in(["top_25pct_act_keep", "residual_not_top_25pct_act"]))
+    ).select(
+        "adapter", "component", "keep_or_drop",
+        pl.col("frob_frac").alias("frob_frac_or_energy"),
+        "retained",
+    ).with_columns(pl.lit("lens4_act_basis").alias("lens"))
+    cmp = pl.concat([own_top25, act_top25]).sort(["adapter", "lens", "keep_or_drop"])
+    print("\nLens 1 vs Lens 4 (top-25% keep/drop, same adapter)")
+    print(tabulate(cmp.to_pandas(), headers="keys", tablefmt="pipe", floatfmt="+.3f", showindex=False))
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for adapter in sorted(act_view["adapter"].unique().to_list()):
+        sub = act.filter((pl.col("coeff") == 1.0) & (pl.col("adapter") == adapter))
+        ax.scatter(sub["frob_frac"], sub["retained"], s=60, alpha=0.8, label=f"{adapter} (act-basis)")
+        # overlay lens 1 (own-SVD) for same adapter
+        own = sR.filter((pl.col("adapter") == adapter) & (pl.col("variant") != "full_dW"))
+        ax.scatter(own["energy_frac"], own["retained"], s=30, alpha=0.4, marker="x", label=f"{adapter} (own-SVD)")
+    ax.axhline(1.0, color="k", lw=0.5, alpha=0.3, linestyle="--")
+    ax.axhline(0.0, color="k", lw=0.5, alpha=0.3)
+    ax.plot([0, 1], [0, 1], color="k", lw=0.5, alpha=0.2, linestyle=":")
+    ax.set_xlabel("frob_frac of dW retained")
+    ax.set_ylabel("retained dd_delta / full")
+    ax.set_title("Lens 4: activation basis vs Lens 1: own-SVD")
+    ax.legend(fontsize=8, loc="best")
+    fig.tight_layout()
+    fig_path = OUT_DIR / "lens4_activation_basis.png"
+    fig.savefig(fig_path, dpi=120)
+    logger.info(f"saved {fig_path}")
+else:
+    logger.info(f"lens 4 skipped: {act_path} not found (run activation_basis_ablation.py)")
+
+
+# %% [markdown]
 # ## Joint summary
 #
 # One number per lens per adapter, computed from the data above:
