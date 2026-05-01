@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -23,12 +24,36 @@ from tqdm.auto import tqdm
 _CONFIGURED: set[str] = set()
 
 
+def quiet_external_logs() -> None:
+    """Suppress third-party progress bars and advisory warnings on stdout."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+    os.environ.setdefault("DATASETS_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+    warnings.filterwarnings("ignore", message="`torch_dtype` is deprecated! Use `dtype` instead!")
+    try:
+        import datasets
+
+        datasets.disable_progress_bars()
+    except Exception:
+        pass
+    try:
+        from transformers.utils import logging as hf_logging
+
+        hf_logging.set_verbosity_error()
+        if hasattr(hf_logging, "disable_progress_bar"):
+            hf_logging.disable_progress_bar()
+    except Exception:
+        pass
+
+
 def setup_logging(name: str, log_dir: str | Path = "logs") -> Path:
     """Configure loguru once per entrypoint name. Returns the verbose log path."""
     log_path = Path(log_dir) / f"{name}.verbose.log"
     if name in _CONFIGURED:
         return log_path
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    quiet_external_logs()
 
     logger.remove()
     level = os.environ.get("LOG_LEVEL", "INFO")

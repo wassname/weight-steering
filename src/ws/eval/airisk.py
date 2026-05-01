@@ -32,11 +32,13 @@ import polars as pl
 import torch
 from datasets import Dataset, load_dataset
 from loguru import logger
+from tabulate import tabulate
 from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPadding
 
 from ws._tok_extras import chat_template_extras
+from ws._log import final_summary, get_argv, setup_logging
 from ws.eval.dilemmas import compute_surgical_informedness
 from ws.eval.guided_cot import guided_rollout_batch
 from ws.steer import weight_steer
@@ -194,9 +196,11 @@ def _load_eval(tok, cfg: AIRiskCfg):
 @torch.no_grad()
 def _eval_at_coeff(model, tok, dl: DataLoader, alpha: float,
                    w: dict[str, Tensor], choice_ids: list[list[int]],
-                   pmass_threshold: float, n_think: int) -> list[dict]:
+                   pmass_threshold: float, n_think: int) -> tuple[list[dict], dict[str, float]]:
     rows = []
     n_forced, n_total = 0, 0
+    pmass_vals: list[float] = []
+    low_pmass_vals: list[bool] = []
     for batch in dl:
         ids = batch["input_ids"].to(model.device)
         mask = batch["attention_mask"].to(model.device)
@@ -211,6 +215,8 @@ def _eval_at_coeff(model, tok, dl: DataLoader, alpha: float,
         low_pmass = pmass < pmass_threshold * out["maxp"]
         n_forced += int(out["forced_close"].sum())
         n_total += len(logratio)
+        pmass_vals.extend(float(x) for x in pmass.tolist())
+        low_pmass_vals.extend(bool(x) for x in low_pmass.tolist())
         for i in range(len(logratio)):
             rows.append({
                 "idx": int(batch["idx"][i].item()),
@@ -220,10 +226,14 @@ def _eval_at_coeff(model, tok, dl: DataLoader, alpha: float,
                 "pmass": float(pmass[i].item()),
                 "low_pmass": bool(low_pmass[i].item()),
             })
-    frac = n_forced / max(n_total, 1)
-    logger.info(f"alpha={alpha:+.1f}: forced-close {n_forced}/{n_total} "
-                f"({frac:.0%}); raise n_think if >50%")
-    return rows
+    stats = {
+        "coeff": float(alpha),
+        "forced_close_frac": n_forced / max(n_total, 1),
+        "mean_pmass": float(np.mean(pmass_vals)) if pmass_vals else float("nan"),
+        "frac_low_pmass": float(np.mean(low_pmass_vals)) if low_pmass_vals else float("nan"),
+        "n_rows": len(rows),
+    }
+    return rows, stats
 
 
 def evaluate(cfg: AIRiskCfg, w: dict[str, Tensor],
@@ -240,7 +250,7 @@ def evaluate(cfg: AIRiskCfg, w: dict[str, Tensor],
             tok.pad_token = tok.eos_token
     if model is None:
         model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id, torch_dtype=torch.bfloat16, device_map="auto"
+            cfg.model_id, dtype=torch.bfloat16, device_map="auto"
         )
         model.eval()
 
@@ -251,10 +261,16 @@ def evaluate(cfg: AIRiskCfg, w: dict[str, Tensor],
     choice_ids = get_action_choice_ids(tok)
 
     rows = []
+    stats_rows = []
     for alpha in cfg.coeffs:
-        rows.extend(_eval_at_coeff(model, tok, dl, alpha, w, choice_ids,
-                                   cfg.pmass_threshold, cfg.n_think))
-        logger.info(f"alpha={alpha:+.1f}: {len([r for r in rows if r['coeff']==alpha])} rows")
+        coeff_rows, stats = _eval_at_coeff(model, tok, dl, alpha, w, choice_ids,
+                                           cfg.pmass_threshold, cfg.n_think)
+        rows.extend(coeff_rows)
+        stats_rows.append(stats)
+
+    logger.info(f"airisk eval: value_class={cfg.value_class} n_rows={len(ds_raw)}")
+    logger.info("SHOULD: forced_close_frac stays low and mean_pmass stays near 1. ELSE n_think or answer anchor is broken.")
+    logger.info("\n" + tabulate(stats_rows, headers="keys", tablefmt="tsv", floatfmt="+.3f", showindex=False))
 
     df = pl.DataFrame(rows)
     meta = pl.DataFrame([{"idx": int(p["idx"]), "value_label": float(p["value_label"])}
@@ -328,10 +344,10 @@ class _AIRiskCli:
 def main():
     """CLI: load w.pt for {behavior}/{adapter}, run AIRisk sweep, save csv."""
     import tyro
-    from tabulate import tabulate
     from ws.diff import load_diff
 
     cli = tyro.cli(_AIRiskCli)
+    setup_logging("airisk")
     out_dir = cli.out / cli.behavior / cli.adapter
     w = load_diff(out_dir / "w.pt")
     cfg = AIRiskCfg(
@@ -343,14 +359,22 @@ def main():
     df = evaluate(cfg, w)
     df.write_csv(out_dir / f"airisk_{cli.value_class.lower()}_per_row.csv")
     summary = summarize(df)
+    summary_path = out_dir / f"airisk_{cli.value_class.lower()}_summary.csv"
+    summary.write_csv(summary_path)
+    metrics = compute_metrics(df)
     print(f"\nairisk eval summary (value_class={cli.value_class!r})")
-    print("SHOULD: mean_logratio_value monotone in coeff (positive coeff -> more value-aligned).")
-    print("ELSE flat curve = w doesn't transfer to high-stakes AI dilemmas.")
+    print("SHOULD: mean_logratio_value monotone in coeff; positive coeff should raise value-alignment.")
     print(tabulate(summary.to_pandas(), tablefmt="tsv", headers="keys",
                    floatfmt="+.3f", showindex=False))
-    summary.write_csv(out_dir / f"airisk_{cli.value_class.lower()}_summary.csv")
-    metrics = compute_metrics(df)
-    print(f"\nSI={metrics['surgical_informedness']:.2f} (n={metrics['n_samples']})")
+    final_summary(
+        out=summary_path,
+        argv=get_argv(),
+        main_metric=f"SI={metrics['surgical_informedness']:+.2f} n={metrics['n_samples']}",
+        cue="🟢",
+        table_rows=summary.select("coeff", "mean_logratio_value", "mean_pmass", "frac_low_pmass", "n").rows(),
+        headers=["coeff", "mean_logratio_value", "mean_pmass", "frac_low_pmass", "n"],
+        floatfmt="+.3f",
+    )
 
 
 if __name__ == "__main__":

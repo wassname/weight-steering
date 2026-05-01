@@ -70,7 +70,7 @@ def main(cfg: FullDDBenchmarkCfg) -> None:
     tok = AutoTokenizer.from_pretrained(cfg.model)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(cfg.model, dtype=torch.bfloat16, device_map="auto")
     model.eval()
 
     parts = []
@@ -84,7 +84,7 @@ def main(cfg: FullDDBenchmarkCfg) -> None:
     for adapter in cfg.adapters:
         w_path = cfg.out / cfg.behavior / adapter / DIFF_FILENAME
         w = load_diff(w_path)
-        logger.info(f"adapter={adapter}: evaluating full DD from {w_path}")
+        logger.info(f"\n=== adapter={adapter} ===")
         df = evaluate(dcfg, w, model=model, tok=tok).with_columns(pl.lit(adapter).alias("adapter"))
         parts.append(df)
 

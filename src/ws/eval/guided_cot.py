@@ -27,6 +27,9 @@ Qwen3 thinking-mode gotchas:
 
 from __future__ import annotations
 
+from copy import deepcopy
+from contextlib import contextmanager
+
 import torch
 from torch import Tensor
 
@@ -40,6 +43,25 @@ THINK_CLOSE = "</think>"
 # Default suffix for the batched dilemmas primitive: closes think, then the
 # "My choice:" anchor matching INSTRUCTION_PROMPT (dilemmas.py).
 DILEMMAS_ANCHOR = "\n\nMy choice:"
+
+
+@contextmanager
+def _greedy_generation(model):
+    """Temporarily sanitize model generation config for greedy eval."""
+    old_cfg = deepcopy(model.generation_config)
+    try:
+        model.generation_config.do_sample = False
+        if hasattr(model.generation_config, "temperature"):
+            model.generation_config.temperature = 1.0
+        if hasattr(model.generation_config, "top_p"):
+            model.generation_config.top_p = 1.0
+        if hasattr(model.generation_config, "top_k"):
+            model.generation_config.top_k = 50
+        if hasattr(model.generation_config, "min_p"):
+            model.generation_config.min_p = None
+        yield
+    finally:
+        model.generation_config = old_cfg
 
 
 @torch.no_grad()
@@ -68,12 +90,13 @@ def guided_cot_one(
                            "this eval assumes a thinking-mode chat template")
 
     with weight_steer(model, w, alpha):
-        gen = model.generate(
-            prefix_ids,
-            max_new_tokens=n_think,
-            do_sample=False,
-            pad_token_id=tok.pad_token_id or tok.eos_token_id,
-        )
+        with _greedy_generation(model):
+            gen = model.generate(
+                prefix_ids,
+                max_new_tokens=n_think,
+                do_sample=False,
+                pad_token_id=tok.pad_token_id or tok.eos_token_id,
+            )
         gen_new = gen[0, prefix_ids.shape[1]:]
         already_closed = (gen_new == think_close_id).any().item()
         pre_ids = tok(PRE_CLOSE, return_tensors="pt",
@@ -157,14 +180,15 @@ def guided_rollout_batch(
 
     with weight_steer(model, w, alpha):
         # Phase 1: batched greedy think under steering.
-        gen = model.generate(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            max_new_tokens=n_think,
-            do_sample=False,
-            eos_token_id=think_close_id,
-            pad_token_id=pad_id,
-        )
+        with _greedy_generation(model):
+            gen = model.generate(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=n_think,
+                do_sample=False,
+                eos_token_id=think_close_id,
+                pad_token_id=pad_id,
+            )
         gen_new = gen[:, L_pad:]  # [B, g], right-padded with pad_id post-eos
 
         # Phase 2: per-sample slice + suffix build.

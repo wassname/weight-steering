@@ -31,6 +31,7 @@ import polars as pl
 import torch
 from datasets import Dataset, load_dataset
 from loguru import logger
+from tabulate import tabulate
 from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPadding
@@ -146,9 +147,11 @@ def _choice_logp(logits_last: Tensor, choice_ids: list[list[int]]) -> Tensor:
 @torch.no_grad()
 def _eval_at_coeff(model, tok, dl: DataLoader, alpha: float,
                    w: dict[str, Tensor], choice_ids: list[list[int]],
-                   pmass_threshold: float, n_think: int) -> list[dict]:
+                   pmass_threshold: float, n_think: int) -> tuple[list[dict], dict[str, float]]:
     rows = []
     n_forced, n_total = 0, 0
+    pmass_vals: list[float] = []
+    low_pmass_vals: list[bool] = []
     for batch in dl:
         ids = batch["input_ids"].to(model.device)
         mask = batch["attention_mask"].to(model.device)
@@ -161,6 +164,8 @@ def _eval_at_coeff(model, tok, dl: DataLoader, alpha: float,
         low_pmass = pmass < pmass_threshold * out["maxp"]
         n_forced += int(out["forced_close"].sum())
         n_total += len(logratio)
+        pmass_vals.extend(float(x) for x in pmass.tolist())
+        low_pmass_vals.extend(bool(x) for x in low_pmass.tolist())
         for i in range(len(logratio)):
             rows.append({
                 "idx": int(batch["idx"][i].item()),
@@ -170,10 +175,14 @@ def _eval_at_coeff(model, tok, dl: DataLoader, alpha: float,
                 "pmass": float(pmass[i].item()),
                 "low_pmass": bool(low_pmass[i].item()),
             })
-    frac = n_forced / max(n_total, 1)
-    logger.info(f"alpha={alpha:+.1f}: forced-close {n_forced}/{n_total} "
-                f"({frac:.0%}); raise n_think if >50%")
-    return rows
+    stats = {
+        "coeff": float(alpha),
+        "forced_close_frac": n_forced / max(n_total, 1),
+        "mean_pmass": float(np.mean(pmass_vals)) if pmass_vals else float("nan"),
+        "frac_low_pmass": float(np.mean(low_pmass_vals)) if low_pmass_vals else float("nan"),
+        "n_rows": len(rows),
+    }
+    return rows, stats
 
 
 def evaluate(cfg: DilemmasCfg, w: dict[str, Tensor],
@@ -188,7 +197,7 @@ def evaluate(cfg: DilemmasCfg, w: dict[str, Tensor],
             tok.pad_token = tok.eos_token
     if model is None:
         model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id, torch_dtype=torch.bfloat16, device_map="auto"
+            cfg.model_id, dtype=torch.bfloat16, device_map="auto"
         )
         model.eval()
 
@@ -201,10 +210,16 @@ def evaluate(cfg: DilemmasCfg, w: dict[str, Tensor],
     choice_ids = get_choice_ids(tok)
 
     rows = []
+    stats_rows = []
     for alpha in cfg.coeffs:
-        rows.extend(_eval_at_coeff(model, tok, dl, alpha, w, choice_ids,
-                                   cfg.pmass_threshold, cfg.n_think))
-        logger.info(f"alpha={alpha:+.1f}: {len([r for r in rows if r['coeff']==alpha])} rows")
+        coeff_rows, stats = _eval_at_coeff(model, tok, dl, alpha, w, choice_ids,
+                                           cfg.pmass_threshold, cfg.n_think)
+        rows.extend(coeff_rows)
+        stats_rows.append(stats)
+
+    logger.info(f"dilemmas eval: {len(ds_raw)} rows across {cfg.n_dilemmas} dilemmas")
+    logger.info("SHOULD: forced_close_frac stays low and mean_pmass stays near 1. ELSE n_think or format is broken.")
+    logger.info("\n" + tabulate(stats_rows, headers="keys", tablefmt="tsv", floatfmt="+.3f", showindex=False))
 
     df = pl.DataFrame(rows)
     meta = pl.DataFrame([
@@ -231,7 +246,7 @@ def evaluate_with_baselines(cfg: DilemmasCfg, w: dict[str, Tensor]) -> pl.DataFr
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        cfg.model_id, dtype=torch.bfloat16, device_map="auto"
     )
     model.eval()
 
@@ -314,7 +329,8 @@ def compute_surgical_informedness(
     si_rev = flip_rate - k_fpr * counter_rate
 
     pmass_ratio = min(pmass_pos, pmass_neg) ** 2
-    si = np.nanmean([si_fwd, si_rev]) * pmass_ratio * 100
+    si_terms = np.asarray([si_fwd, si_rev], dtype=float)
+    si = float(np.nan) if np.isnan(si_terms).all() else float(np.nanmean(si_terms) * pmass_ratio * 100)
 
     return {
         "surgical_informedness": si,
