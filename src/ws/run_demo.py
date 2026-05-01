@@ -28,7 +28,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from ws._log import final_summary, get_argv, setup_logging
 from ws.data import train_topics
 from ws.diff import load_diff
-from ws.eval.guided_cot import guided_cot_one
+from ws.guided_cot import guided_cot_one
 from ws.eval.sycophancy import get_choice_ids
 
 

@@ -35,7 +35,7 @@ data:
 
 # One-off greedy persona collapse debugger.
 debug-personas:
-    uv run python -m ws.debug_personas --model {{model}} --behavior {{behavior}} --out {{out}}
+    uv run python -m ws.scripts.debug_personas --model {{model}} --behavior {{behavior}} --out {{out}}
 
 # Train a single adapter (positive or negative). Pos/neg controls system prompt at gen time.
 train sign="pos":
@@ -64,7 +64,7 @@ eval-tinymfv-airisk:
 
 # Build the combined AIRisk README table once per-adapter runs are done.
 summarize-airisk:
-    uv run python -m ws.eval.readme_airisk_table --behavior {{behavior}} --out {{out}}
+    uv run python -m ws.scripts.readme_airisk_table --behavior {{behavior}} --out {{out}}
 
 # Phase 2: project w onto SVD + AntiPaSTO subspaces, print alignment table.
 subspace-align:

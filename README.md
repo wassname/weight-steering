@@ -95,7 +95,7 @@ just eval-tinymfv-airisk adapter=delora behavior=honesty
 just summarize-airisk behavior=honesty
 ```
 
-Source layout: `src/ws/{data,train,diff,steer,subspace,replicate,run_sweep}.py`, `src/ws/eval/{sycophancy,airisk,tinymfv_airisk,readme_airisk_table}.py`. Outputs to `out/<behavior>/<adapter>/`.
+Source layout: core modules live in `src/ws/`, active benchmarks in `src/ws/eval/`, and CLI/report helpers in `src/ws/scripts/`. Outputs go to `out/<behavior>/<adapter>/`.
 
 ## Cite
 

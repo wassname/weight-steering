@@ -39,7 +39,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPa
 
 from ws._tok_extras import chat_template_extras
 from ws._log import final_summary, get_argv, setup_logging
-from ws.eval.guided_cot import guided_rollout_batch
+from ws.guided_cot import guided_rollout_batch
 from ws.steer import weight_steer
 
 # Guided-CoT prompt: model thinks inside <think>...</think>, then answers at
