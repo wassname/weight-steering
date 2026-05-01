@@ -52,10 +52,19 @@ eval-syco:
     uv run python -m ws.eval.sycophancy --model {{model}} \
         --adapter {{adapter}} --out {{out}}
 
-# Phase 4 eval: daily dilemmas Yes/No logratio.
-eval-dilemmas:
-    uv run python -m ws.eval.dilemmas --model {{model}} \
+# AIRiskDilemmas guided-CoT eval.
+eval-airisk:
+    uv run python -m ws.eval.airisk --model {{model}} \
         --adapter {{adapter}} --out {{out}}
+
+# tiny-mfv AIRisk logprob eval with bootstrap uncertainty.
+eval-tinymfv-airisk:
+    uv run python -m ws.eval.tinymfv_airisk --model {{model}} \
+        --behavior {{behavior}} --adapter {{adapter}} --out {{out}}
+
+# Build the combined AIRisk README table once per-adapter runs are done.
+summarize-airisk:
+    uv run python -m ws.eval.readme_airisk_table --behavior {{behavior}} --out {{out}}
 
 # Phase 2: project w onto SVD + AntiPaSTO subspaces, print alignment table.
 subspace-align:
