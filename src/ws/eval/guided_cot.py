@@ -37,6 +37,10 @@ PRE_CLOSE = "\nI should answer now.\n"
 POST_CLOSE = "\n\nFinal answer: **"
 THINK_CLOSE = "</think>"
 
+# Default suffix for the batched dilemmas primitive: closes think, then the
+# "My choice:" anchor matching INSTRUCTION_PROMPT (dilemmas.py).
+DILEMMAS_ANCHOR = "\n\nMy choice:"
+
 
 @torch.no_grad()
 def guided_cot_one(
@@ -97,4 +101,112 @@ def guided_cot_one(
         "cot": cot_text,
         "margin": (logp_yes - logp_no).item(),
         "pmass": (logp_no.exp() + logp_yes.exp()).item(),
+    }
+
+
+@torch.no_grad()
+def guided_rollout_batch(
+    model,
+    tok,
+    input_ids: Tensor,            # [B, L_pad] left-padded prompt (with <think> open)
+    attention_mask: Tensor,       # [B, L_pad]
+    alpha: float,
+    w: dict[str, Tensor],
+    choice_ids: list[list[int]],  # [[no_ids], [yes_ids]]
+    n_think: int = 32,
+    answer_anchor: str = DILEMMAS_ANCHOR,
+    pre_close: str = PRE_CLOSE,
+) -> dict:
+    """Batched think -> force-close -> score yes/no at the answer anchor.
+
+    Phase 1: greedy generate up to n_think tokens with eos=</think>; HF stops a
+        sample at first eos and right-pads with pad_id.
+    Phase 2: per-sample slice (truncate at first </think>; if absent, append
+        forced close), then concat [prompt, think, pre_close, </think>, anchor].
+    Phase 3: left-repad, single forward pass, score logp(yes)/logp(no) at last
+        position. Returns logp_no, logp_yes, maxp, forced_close (all [B]).
+
+    Asserts: tok.padding_side=='left' (so phase-3 logits[:, -1] lands on the
+    answer position), think_close_id != eos_token_id (so phase-1 stops only on
+    </think>, not on natural eos).
+    """
+    assert tok.padding_side == "left", \
+        f"guided_rollout_batch requires tok.padding_side=='left', got {tok.padding_side!r}"
+
+    think_close_id = tok.convert_tokens_to_ids(THINK_CLOSE)
+    if think_close_id is None or think_close_id == tok.unk_token_id:
+        raise RuntimeError(f"tokenizer has no special token {THINK_CLOSE!r}; "
+                           "this primitive assumes a thinking-mode chat template")
+    if think_close_id == tok.eos_token_id:
+        raise RuntimeError(f"think_close_id collides with eos_token_id ({think_close_id}); "
+                           "phase-1 cannot distinguish 'finished thinking' from 'finished'")
+
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+    device = model.device
+    B, L_pad = input_ids.shape
+
+    # Suffix between (forced or natural) </think> and the answer anchor.
+    # If the model emitted </think> naturally we still want the anchor, but
+    # without re-emitting another </think>. So: closed -> [anchor]; not closed
+    # -> [pre_close, </think>, anchor].
+    anchor_ids = tok.encode(answer_anchor, add_special_tokens=False)
+    pre_close_ids = tok.encode(pre_close, add_special_tokens=False)
+
+    no_ids_t = torch.tensor(choice_ids[0], dtype=torch.long, device=device)
+    yes_ids_t = torch.tensor(choice_ids[1], dtype=torch.long, device=device)
+
+    with weight_steer(model, w, alpha):
+        # Phase 1: batched greedy think under steering.
+        gen = model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            max_new_tokens=n_think,
+            do_sample=False,
+            eos_token_id=think_close_id,
+            pad_token_id=pad_id,
+        )
+        gen_new = gen[:, L_pad:]  # [B, g], right-padded with pad_id post-eos
+
+        # Phase 2: per-sample slice + suffix build.
+        seqs: list[list[int]] = []
+        forced_close = torch.zeros(B, dtype=torch.bool)
+        for b in range(B):
+            # Recover un-padded prompt for this sample.
+            prompt_b = input_ids[b][attention_mask[b].bool()].tolist()
+
+            row = gen_new[b]
+            close_pos = (row == think_close_id).nonzero(as_tuple=False)
+            if close_pos.numel() > 0:
+                k = int(close_pos[0].item())
+                think_b = row[:k + 1].tolist()  # include the </think>
+                suffix = anchor_ids
+            else:
+                # Strip any trailing pads (shouldn't be any if no eos hit, but defensive).
+                non_pad = (row != pad_id).nonzero(as_tuple=False)
+                end = int(non_pad[-1].item()) + 1 if non_pad.numel() > 0 else 0
+                think_b = row[:end].tolist()
+                suffix = pre_close_ids + [think_close_id] + anchor_ids
+                forced_close[b] = True
+
+            seqs.append(prompt_b + think_b + suffix)
+
+        # Phase 3: left-repad and forward.
+        padded = tok.pad(
+            {"input_ids": seqs},
+            padding="longest",
+            return_tensors="pt",
+        )
+        ids2 = padded["input_ids"].to(device)
+        mask2 = padded["attention_mask"].to(device)
+        logits_last = model(input_ids=ids2, attention_mask=mask2).logits[:, -1].float()
+        logp = logits_last.log_softmax(-1)
+        logp_no = logp[:, no_ids_t].logsumexp(-1)
+        logp_yes = logp[:, yes_ids_t].logsumexp(-1)
+        maxp = logits_last.softmax(-1).max(-1).values
+
+    return {
+        "logp_no": logp_no.cpu(),
+        "logp_yes": logp_yes.cpu(),
+        "maxp": maxp.cpu(),
+        "forced_close": forced_close,
     }

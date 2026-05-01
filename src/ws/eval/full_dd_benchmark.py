@@ -79,6 +79,7 @@ def main(cfg: FullDDBenchmarkCfg) -> None:
         coeffs=cfg.coeffs,
         n_dilemmas=cfg.n_dilemmas,
         batch_size=cfg.batch_size,
+        n_think=128,
     )
     for adapter in cfg.adapters:
         w_path = cfg.out / cfg.behavior / adapter / DIFF_FILENAME

@@ -164,6 +164,7 @@ def main(cfg: PromptBaselineCfg) -> None:
             n_dilemmas=cfg.n_dilemmas,
             batch_size=cfg.batch_size,
             system_prompt=system_prompt,
+            n_think=128,
         )
         parts.append(evaluate(pcfg, {}, model=model, tok=tok).with_columns(pl.lit(method).alias("method")))
 

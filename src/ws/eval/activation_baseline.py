@@ -223,6 +223,7 @@ def _dilemmas_eval_repe(model, tok, directions: Tensor, cfg: ActivationBaselineC
         n_dilemmas=cfg.n_dilemmas,
         batch_size=cfg.batch_size,
         max_tokens=cfg.max_tokens,
+        n_think=128,
     )
     old_padding_side = tok.padding_side
     tok.padding_side = "left"
