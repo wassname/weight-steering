@@ -9,8 +9,7 @@ All evals use base persona at eval time. No system prompt.
 
 ### Primary evals: AIRiskDilemmas + tiny-mfv AIRisk
 
-DailyDilemmas has been retired from the active workflow in this repo. The
-current headline evaluations are:
+The current headline evaluations are:
 
 - **AIRiskDilemmas / Truthfulness**: guided-CoT, action-choice preference on
   1,869 labeled dilemmas from `kellycyy/AIRiskDilemmas`.

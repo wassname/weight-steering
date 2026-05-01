@@ -26,9 +26,9 @@ EVAL_HEADER = "My answer: **"
 def _strip_choice_token(token: str) -> str:
     """Normalize leading whitespace and tokenizer boundary markers, not punctuation.
 
-    DailyDilemmas asks for exactly `Yes`/`No` after an assistant prefill. Tokens
-    like `.No` or `\"Yes` are invalid continuations there; including them spends
-    probability mass on malformed answers and diverges from steering-lite.
+    This eval asks for exactly `Yes`/`No` after an assistant prefill. Tokens like
+    `.No` or `\"Yes` are invalid continuations there; including them spends
+    probability mass on malformed answers.
     """
     token = token.lstrip()
     for marker in ("Ġ", "▁", "##", "Ċ"):
@@ -99,8 +99,7 @@ def evaluate(cfg: EvalCfg, w: dict[str, Tensor]) -> pl.DataFrame:
     # True held-out topics: data.py reserves SYCOPHANCY_TOPICS[N_TRAIN_TOPICS:]
     # for eval (paper-style 20 train / 12 eval split). Different *questions*
     # than training, so this measures generalization across the topic distribution
-    # within the same domain (still in-domain — not full OOD). For full OOD use
-    # ws.eval.dilemmas.
+    # within the same domain.
     held_out = eval_topics()[:cfg.n_held_out]
 
     rows = []
