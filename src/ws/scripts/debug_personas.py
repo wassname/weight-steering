@@ -65,7 +65,7 @@ def main(cfg: PersonaDebugCfg) -> None:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, dtype=torch.bfloat16, device_map="auto"
+        cfg.model, dtype=torch.bfloat16, device_map="cuda"
     )
     model.eval()
 

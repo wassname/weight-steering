@@ -360,7 +360,7 @@ def main(cfg: KLCalibrateCfg) -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, dtype=torch.bfloat16, device_map="auto"
+        cfg.model, dtype=torch.bfloat16, device_map="cuda"
     )
     model.eval()
 

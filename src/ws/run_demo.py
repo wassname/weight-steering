@@ -85,7 +85,7 @@ def phase_a1(cfg: Cfg, claims: list[tuple[str, str]], tok) -> None:
         adapter_path = cfg.out / cfg.behavior / cfg.adapter / sign
         logger.info(f"loading {sign} adapter from {adapter_path}")
         base = AutoModelForCausalLM.from_pretrained(
-            cfg.model, torch_dtype=torch.bfloat16, device_map="auto"
+            cfg.model, torch_dtype=torch.bfloat16, device_map="cuda"
         )
         model = PeftModel.from_pretrained(base, str(adapter_path))
         model.eval()
@@ -106,7 +106,7 @@ def phase_a2(cfg: Cfg, claims: list[tuple[str, str]], tok) -> pl.DataFrame:
     w = load_diff(w_path)
 
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, torch_dtype=torch.bfloat16, device_map="auto"
+        cfg.model, torch_dtype=torch.bfloat16, device_map="cuda"
     )
     model.eval()
     choice_ids = get_choice_ids(tok)

@@ -298,7 +298,7 @@ def evaluate(cfg: AIRiskCfg, w: dict[str, Tensor],
             tok.pad_token = tok.eos_token
     if model is None:
         model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_id, dtype=torch.bfloat16, device_map="auto"
+            cfg.model_id, dtype=torch.bfloat16, device_map="cuda"
         )
         model.eval()
 

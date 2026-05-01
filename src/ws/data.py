@@ -426,7 +426,7 @@ def generate_pairs(cfg: DataCfg) -> Path:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, torch_dtype=torch.bfloat16, device_map="auto"
+        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda"
     )
     model.eval()
 
