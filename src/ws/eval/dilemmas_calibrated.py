@@ -104,6 +104,12 @@ def _eval_dilemmas_repe(model, tok, dirs, layers, alpha, dl, choice_ids, pmass_t
     return rows
 
 
+def _alpha_triplet(row: dict) -> tuple[float, float]:
+    alpha_pos = float(row["alpha_pos"]) if "alpha_pos" in row else float(row["calibrated_alpha"])
+    alpha_neg = float(row["alpha_neg"]) if "alpha_neg" in row else float(row["calibrated_alpha"])
+    return alpha_pos, alpha_neg
+
+
 def main(cfg: DilemmasCalibratedCfg) -> None:
     setup_logging("dilemmas_calibrated")
     out_dir = cfg.out / cfg.behavior / "dilemmas_calibrated"
@@ -112,8 +118,12 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
     calib_path = cfg.out / cfg.behavior / "kl_calibration" / "summary.csv"
     calib = pl.read_csv(calib_path)
     logger.info(f"loaded calibration: {len(calib)} methods from {calib_path}")
-    logger.info(tabulate(calib.select("method", "calibrated_alpha", "p95_at_calib").to_pandas(),
-                          headers="keys", tablefmt="tsv", floatfmt="+.3f", showindex=False))
+    cols = ["method", "alpha_neg", "alpha_pos", "p95_at_neg", "p95_at_pos"]
+    fallback_cols = ["method", "calibrated_alpha"]
+    logger.info(tabulate(
+        calib.select([c for c in cols if c in calib.columns] or fallback_cols).to_pandas(),
+        headers="keys", tablefmt="tsv", floatfmt="+.3f", showindex=False
+    ))
 
     tok = AutoTokenizer.from_pretrained(cfg.model)
     if tok.pad_token is None:
@@ -153,12 +163,12 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
     # Adapter dW evals at calibrated ±α and 0.
     for row in calib.iter_rows(named=True):
         method = row["method"]
-        alpha_c = float(row["calibrated_alpha"])
+        alpha_pos, alpha_neg = _alpha_triplet(row)
         if method.startswith("dW:"):
             adapter = method.split(":", 1)[1]
             w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
             rows = []
-            for alpha in (-alpha_c, 0.0, alpha_c):
+            for alpha in (-alpha_neg, 0.0, alpha_pos):
                 rows.extend(_eval_dilemmas_dw(model, tok, w, alpha, dl, choice_ids,
                                                cfg.pmass_threshold, method))
                 logger.info(f"  {method} α={alpha:+.3f}: {len(ds_pt)} rows")
@@ -166,7 +176,7 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
         elif method == "repe":
             dirs = _fit_repe_directions(model, tok, cfg.n_repe_train, cfg.behavior)
             rows = []
-            for alpha in (-alpha_c, 0.0, alpha_c):
+            for alpha in (-alpha_neg, 0.0, alpha_pos):
                 rows.extend(_eval_dilemmas_repe(model, tok, dirs, cfg.repe_layers, alpha, dl,
                                                   choice_ids, cfg.pmass_threshold))
                 logger.info(f"  repe α={alpha:+.3f}: {len(ds_pt)} rows")
@@ -261,9 +271,11 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
 
         # Get calibrated alpha for this method (1.0 for prompts).
         if method.startswith("prompt:"):
-            alpha_c = 1.0
+            alpha_pos = 1.0
+            alpha_neg = 1.0
         else:
-            alpha_c = float(calib.filter(pl.col("method") == method)["calibrated_alpha"][0])
+            row = next(calib.filter(pl.col("method") == method).iter_rows(named=True))
+            alpha_pos, alpha_neg = _alpha_triplet(row)
 
         # Mean logratio_honesty per coeff.
         zero_lr = float(sub.filter(pl.col("coeff") == 0.0)["logratio_honesty"].mean()) if 0.0 in sub["coeff"].to_list() else float("nan")
@@ -272,7 +284,9 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
 
         si_rows.append({
             "method": method,
-            "alpha": alpha_c,
+            "alpha": alpha_pos,
+            "alpha_pos": alpha_pos,
+            "alpha_neg": alpha_neg,
             "sign": sign_chosen,
             "SI": m["surgical_informedness"],
             "SI_to_do": m.get("SI_to_do", float("nan")),
@@ -304,6 +318,7 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
     si_df.write_csv(si_path)
 
     print("\n=== Dilemmas SI at KL-calibrated α (matched p95 token-KL ≈ 0.615 nats) ===")
+    print("SHOULD: use (-alpha_neg, 0, +alpha_pos) per method. Asymmetry is expected when left/right KL footprints differ.")
     print(tabulate(si_df.to_pandas(), headers="keys", tablefmt="tsv",
                    floatfmt="+.3f", showindex=False))
 
@@ -313,9 +328,9 @@ def main(cfg: DilemmasCalibratedCfg) -> None:
         argv=get_argv(),
         main_metric=f"best_method={si_df['method'][0]} SI={float(si_df['SI'][0] or 0):+.3f}",
         cue=cue,
-        table_rows=si_df.select("method", "alpha", "sign", "SI", "si_fwd", "si_rev",
+        table_rows=si_df.select("method", "alpha_neg", "alpha_pos", "sign", "SI", "si_fwd", "si_rev",
                                   "fix_fwd", "broke_fwd").rows(),
-        headers=["method", "alpha", "sign", "SI", "si_fwd", "si_rev", "fix", "broke"],
+        headers=["method", "alpha_neg", "alpha_pos", "sign", "SI", "si_fwd", "si_rev", "fix", "broke"],
         floatfmt="",
     )
 

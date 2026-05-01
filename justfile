@@ -31,7 +31,11 @@ smoke-sweep:
 
 # Generate +/- pair data for a behavior. Writes to out/data/{behavior}/.
 data:
-    uv run python -m ws.data --model {{model}} --behavior {{behavior}}
+    uv run python -m ws.data --model-id {{model}} --behavior {{behavior}}
+
+# One-off greedy persona collapse debugger.
+debug-personas:
+    uv run python -m ws.debug_personas --model {{model}} --behavior {{behavior}} --out {{out}}
 
 # Train a single adapter (positive or negative). Pos/neg controls system prompt at gen time.
 train sign="pos":

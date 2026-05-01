@@ -72,13 +72,13 @@ class KLCalibrateCfg:
     include_repe: bool = True
     n_calib_prompts: int = 50
     n_audit_prompts: int = 100
-    n_tokens: int = 20
+    n_tokens: int = 50
     target_pct: float = 95.0
     # "Side of the road" = 1 nat per-token KL (gist):
     # https://gist.github.com/wassname/6c11cf30b43d8c228bc114795f1019c7
     # Newton residual is 1 − p95(KL); we search a global coefficient C such
     # that p95 KL = target_kl at α=1.
-    target_kl: float = 1.0
+    target_kl: float = 0.5
     target_prompt: str = "engineered_prompt_honest"  # logged as a reference, not the target
     # Bracket guard (lo, hi) on the global coefficient. KL ~ α²·F near root, so
     # below ~0.05 nothing happens; above ~16 we'd be deep in collapse-land.
@@ -87,7 +87,7 @@ class KLCalibrateCfg:
     n_root_iters: int = 12  # Illinois inner loop; usually converges in 3-5
     convergence_tol: float = 0.05  # |p95 - target| < tol (absolute, in nats)
     repe_layers: tuple[int, ...] = field(default_factory=lambda: tuple(range(8, 22)))
-    n_repe_train: int = 20
+    n_repe_train: int = 50
     seed: int = 0
 
 
@@ -212,8 +212,19 @@ def _measure_kl_along_trajectory(
     }
 
 
-def _illinois_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
-                        w=None, repe_dirs=None) -> dict:
+def _illinois_calibrate(
+    method: str,
+    target: float,
+    *,
+    model,
+    tok,
+    prompts,
+    cfg,
+    alpha_sign: float = 1.0,
+    sign_label: str = "pos",
+    w=None,
+    repe_dirs=None,
+) -> dict:
     """Exponential bracket within (bracket_lo, bracket_hi) then log-log Illinois
     regula falsi. Mirrors steering-lite's validated `calibrate_iso_kl`.
 
@@ -227,18 +238,42 @@ def _illinois_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
     history: list[dict] = []
     iter_idx = [0]
 
-    def stat(alpha: float) -> float:
+    def _result(final: dict, converged: bool) -> dict:
+        return {
+            "method": method,
+            "sign": sign_label,
+            "alpha_sign": alpha_sign,
+            "alpha_mag": abs(final["alpha"]),
+            "calibrated_alpha": final["alpha"],
+            "p95_at_calib": final["p95"],
+            "mean_at_calib": final["mean"],
+            "max_at_calib": final["max"],
+            "ratio_at_calib": final["ratio"],
+            "iterations": len(history),
+            "converged": converged,
+            "history": history,
+        }
+
+    def stat(alpha_mag: float) -> float:
+        alpha = alpha_sign * alpha_mag
         m = _measure_kl_along_trajectory(
             method, alpha, model=model, tok=tok, prompts=prompts,
             n_tokens=cfg.n_tokens, w=w, repe_dirs=repe_dirs,
             repe_layers=cfg.repe_layers,
             log_first_sample=(iter_idx[0] == 0),
-            sample_label=f"calib iter=0 method={method} α={alpha:+.3f}",
+            sample_label=f"calib iter=0 method={method} sign={sign_label} α={alpha:+.3f}",
         )
         ratio = m["p95"] / target if target > 0 else 1.0
-        history.append({"iter": iter_idx[0], "alpha": alpha, **m, "ratio": ratio})
+        history.append({
+            "iter": iter_idx[0],
+            "sign": sign_label,
+            "alpha": alpha,
+            "alpha_mag": alpha_mag,
+            **m,
+            "ratio": ratio,
+        })
         logger.info(
-            f"  [{method}] iter={iter_idx[0]} α={alpha:+.4f} p95={m['p95']:.4g} "
+            f"  [{method}:{sign_label}] iter={iter_idx[0]} α={alpha:+.4f} p95={m['p95']:.4g} "
             f"mean={m['mean']:.4g} max={m['max']:.4g} ratio={ratio:.3f}"
         )
         iter_idx[0] += 1
@@ -251,13 +286,7 @@ def _illinois_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
     mid = float(np.sqrt(lo * hi))
     v_mid = stat(mid)
     if abs(v_mid - target) < cfg.convergence_tol:
-        final = history[-1]
-        return {
-            "method": method, "calibrated_alpha": final["alpha"],
-            "p95_at_calib": final["p95"], "mean_at_calib": final["mean"],
-            "max_at_calib": final["max"], "ratio_at_calib": final["ratio"],
-            "iterations": len(history), "converged": True, "history": history,
-        }
+        return _result(history[-1], True)
 
     if v_mid < target:
         c_lo, v_lo = mid, v_mid
@@ -283,14 +312,7 @@ def _illinois_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
             c_hi, v_hi = c, v
 
     if v_lo is None or v_hi is None:
-        # Couldn't bracket within (lo, hi); report last point seen.
-        final = history[-1]
-        return {
-            "method": method, "calibrated_alpha": final["alpha"],
-            "p95_at_calib": final["p95"], "mean_at_calib": final["mean"],
-            "max_at_calib": final["max"], "ratio_at_calib": final["ratio"],
-            "iterations": len(history), "converged": False, "history": history,
-        }
+        return _result(history[-1], False)
 
     # 2. Log-log Illinois regula-falsi inside the bracket.
     converged = False
@@ -324,22 +346,8 @@ def _illinois_calibrate(method: str, target: float, *, model, tok, prompts, cfg,
 
     # If we exhausted iters without hitting tol, pick the closest point seen.
     if not converged:
-        best = min(history, key=lambda h: abs(h["p95"] - target))
-        final = best
-    else:
-        final = history[-1]
-
-    return {
-        "method": method,
-        "calibrated_alpha": final["alpha"],
-        "p95_at_calib": final["p95"],
-        "mean_at_calib": final["mean"],
-        "max_at_calib": final["max"],
-        "ratio_at_calib": final["ratio"],
-        "iterations": len(history),
-        "converged": converged,
-        "history": history,
-    }
+        return _result(min(history, key=lambda h: abs(h["p95"] - target)), False)
+    return _result(history[-1], True)
 
 
 def main(cfg: KLCalibrateCfg) -> None:
@@ -401,23 +409,33 @@ def main(cfg: KLCalibrateCfg) -> None:
         repe_dirs = _fit_repe_directions(model, tok, cfg.n_repe_train, cfg.behavior)
 
     # 3. Illinois regula-falsi calibrate each adapter and (optionally) RepE.
-    results = []
+    results_by_method: dict[str, dict[str, dict]] = {}
     for adapter in cfg.adapters:
         logger.info(f"\n=== calibrate dW:{adapter} ===")
         w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
-        r = _illinois_calibrate(
-            f"dW:{adapter}", target, model=model, tok=tok,
-            prompts=calib_prompts, cfg=cfg, w=w,
-        )
-        results.append(r)
+        results_by_method[f"dW:{adapter}"] = {
+            "pos": _illinois_calibrate(
+                f"dW:{adapter}", target, model=model, tok=tok,
+                prompts=calib_prompts, cfg=cfg, alpha_sign=1.0, sign_label="pos", w=w,
+            ),
+            "neg": _illinois_calibrate(
+                f"dW:{adapter}", target, model=model, tok=tok,
+                prompts=calib_prompts, cfg=cfg, alpha_sign=-1.0, sign_label="neg", w=w,
+            ),
+        }
 
     if cfg.include_repe:
         logger.info("\n=== calibrate repe ===")
-        r = _illinois_calibrate(
-            "repe", target, model=model, tok=tok,
-            prompts=calib_prompts, cfg=cfg, repe_dirs=repe_dirs,
-        )
-        results.append(r)
+        results_by_method["repe"] = {
+            "pos": _illinois_calibrate(
+                "repe", target, model=model, tok=tok,
+                prompts=calib_prompts, cfg=cfg, alpha_sign=1.0, sign_label="pos", repe_dirs=repe_dirs,
+            ),
+            "neg": _illinois_calibrate(
+                "repe", target, model=model, tok=tok,
+                prompts=calib_prompts, cfg=cfg, alpha_sign=-1.0, sign_label="neg", repe_dirs=repe_dirs,
+            ),
+        }
 
     # 4. Audit: at calibrated α, recompute on n_audit prompts.
     logger.info(f"\n=== AUDIT (n={len(audit_prompts)} prompts) ===")
@@ -441,63 +459,83 @@ def main(cfg: KLCalibrateCfg) -> None:
             "calib_audit_ratio": m_audit["p95"] / m_calib["p95"] if m_calib["p95"] > 0 else float("nan"),
         })
 
-    for r in results:
-        method = r["method"]
-        alpha = r["calibrated_alpha"]
+    logger.info(
+        "SHOULD: pos and neg p95 each match the target independently. "
+        "Asymmetric alpha_pos/alpha_neg means the steering direction has asymmetric KL footprint, not failure."
+    )
+    for method, signs in results_by_method.items():
         if method.startswith("dW:"):
             adapter = method.split(":", 1)[1]
             w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
-            m_audit = _measure_kl_along_trajectory(
-                method, alpha, model=model, tok=tok, prompts=audit_prompts,
-                n_tokens=cfg.n_tokens, w=w,
-            )
-        elif method == "repe":
-            m_audit = _measure_kl_along_trajectory(
-                method, alpha, model=model, tok=tok, prompts=audit_prompts,
-                n_tokens=cfg.n_tokens, repe_dirs=repe_dirs,
-                repe_layers=cfg.repe_layers,
-            )
         else:
-            raise ValueError(method)
-        logger.info(
-            f"  {method} α={alpha:+.3f} audit p95={m_audit['p95']:.4g} "
-            f"(calib was {r['p95_at_calib']:.4g}, target {target:.4g})"
-        )
-        audit_rows.append({
-            "method": method,
-            "alpha": alpha,
-            "p95_calib": r["p95_at_calib"],
-            "mean_calib": r["mean_at_calib"],
-            "p95_audit": m_audit["p95"],
-            "mean_audit": m_audit["mean"],
-            "max_audit": m_audit["max"],
-            "calib_audit_ratio": m_audit["p95"] / r["p95_at_calib"] if r["p95_at_calib"] > 0 else float("nan"),
-        })
+            w = None
+        for sign_label, r in signs.items():
+            alpha = r["calibrated_alpha"]
+            if method.startswith("dW:"):
+                m_audit = _measure_kl_along_trajectory(
+                    method, alpha, model=model, tok=tok, prompts=audit_prompts,
+                    n_tokens=cfg.n_tokens, w=w,
+                )
+            elif method == "repe":
+                m_audit = _measure_kl_along_trajectory(
+                    method, alpha, model=model, tok=tok, prompts=audit_prompts,
+                    n_tokens=cfg.n_tokens, repe_dirs=repe_dirs,
+                    repe_layers=cfg.repe_layers,
+                )
+            else:
+                raise ValueError(method)
+            logger.info(
+                f"  {method}:{sign_label} α={alpha:+.3f} audit p95={m_audit['p95']:.4g} "
+                f"(calib was {r['p95_at_calib']:.4g}, target {target:.4g})"
+            )
+            audit_rows.append({
+                "method": method,
+                "sign": sign_label,
+                "alpha": alpha,
+                "alpha_mag": r["alpha_mag"],
+                "p95_calib": r["p95_at_calib"],
+                "mean_calib": r["mean_at_calib"],
+                "p95_audit": m_audit["p95"],
+                "mean_audit": m_audit["mean"],
+                "max_audit": m_audit["max"],
+                "calib_audit_ratio": m_audit["p95"] / r["p95_at_calib"] if r["p95_at_calib"] > 0 else float("nan"),
+            })
 
     audit_df = pl.DataFrame(audit_rows)
     audit_df.write_csv(out_dir / "audit.csv")
 
     summary_rows = []
-    for r in results:
+    for method, signs in results_by_method.items():
+        pos = signs["pos"]
+        neg = signs["neg"]
         summary_rows.append({
-            "method": r["method"],
-            "calibrated_alpha": r["calibrated_alpha"],
-            "p95_at_calib": r["p95_at_calib"],
-            "mean_at_calib": r["mean_at_calib"],
-            "max_at_calib": r["max_at_calib"],
-            "ratio_at_calib": r["ratio_at_calib"],
-            "iterations": r["iterations"],
-            "converged": r["converged"],
+            "method": method,
+            "alpha_pos": pos["alpha_mag"],
+            "alpha_neg": neg["alpha_mag"],
+            "calibrated_alpha": pos["alpha_mag"],
+            "p95_at_pos": pos["p95_at_calib"],
+            "p95_at_neg": neg["p95_at_calib"],
+            "mean_at_pos": pos["mean_at_calib"],
+            "mean_at_neg": neg["mean_at_calib"],
+            "max_at_pos": pos["max_at_calib"],
+            "max_at_neg": neg["max_at_calib"],
+            "ratio_at_pos": pos["ratio_at_calib"],
+            "ratio_at_neg": neg["ratio_at_calib"],
+            "iterations_pos": pos["iterations"],
+            "iterations_neg": neg["iterations"],
+            "converged_pos": pos["converged"],
+            "converged_neg": neg["converged"],
         })
-    summary_df = pl.DataFrame(summary_rows).sort("calibrated_alpha")
+    summary_df = pl.DataFrame(summary_rows).sort("alpha_pos")
     summary_df = summary_df.with_columns(pl.lit(target).alias("target_p95"))
     summary_path = out_dir / "summary.csv"
     summary_df.write_csv(summary_path)
 
     history_rows = []
-    for r in results:
-        for h in r["history"]:
-            history_rows.append({"method": r["method"], **h})
+    for method, signs in results_by_method.items():
+        for sign_label, r in signs.items():
+            for h in r["history"]:
+                history_rows.append({"method": method, "sign": sign_label, **h})
     pl.DataFrame(history_rows).write_csv(out_dir / "root_history.csv")
 
     pl.DataFrame([{"method": k, **v} for k, v in prompt_refs.items()]).write_csv(out_dir / "prompt_refs.csv")
@@ -510,15 +548,23 @@ def main(cfg: KLCalibrateCfg) -> None:
     print(tabulate(audit_df.to_pandas(), headers="keys", tablefmt="tsv",
                    floatfmt="+.4g", showindex=False))
 
-    cue = "🟢" if all(r["converged"] for r in results) else "🟡"
+    n_converged = sum(
+        int(r["converged"])
+        for signs in results_by_method.values()
+        for r in signs.values()
+    )
+    n_total = sum(len(signs) for signs in results_by_method.values())
+    cue = "🟢" if n_converged == n_total else "🟡"
     final_summary(
         out=summary_path,
         argv=get_argv(),
-        main_metric=f"target_p95={target:.4g} converged={sum(r['converged'] for r in results)}/{len(results)}",
+        main_metric=f"target_p95={target:.4g} converged={n_converged}/{n_total}",
         cue=cue,
-        table_rows=summary_df.select("method", "calibrated_alpha", "p95_at_calib",
-                                      "ratio_at_calib", "iterations", "converged").rows(),
-        headers=["method", "alpha", "p95", "ratio", "iters", "ok"],
+        table_rows=summary_df.select(
+            "method", "alpha_neg", "alpha_pos", "p95_at_neg", "p95_at_pos",
+            "iterations_neg", "iterations_pos", "converged_neg", "converged_pos"
+        ).rows(),
+        headers=["method", "alpha_neg", "alpha_pos", "p95_neg", "p95_pos", "iters_neg", "iters_pos", "ok_neg", "ok_pos"],
         floatfmt="",
     )
 

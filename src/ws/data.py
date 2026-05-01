@@ -18,16 +18,19 @@ Output columns:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
 import torch
+import tyro
 from datasets import Dataset
 from loguru import logger
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from ws._tok_extras import chat_template_extras
+from ws._log import get_argv, setup_logging
+from ws._tok_extras import chat_template_extras, has_thinking_mode
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data"
@@ -162,8 +165,14 @@ class DataCfg:
     n_personas: int = 5
     n_samples: int = 10
     out: Path = Path("out/data")
-    max_new_tokens: int = 96
-    temperature: float = 0.8
+    batch_size: int = 8
+    min_new_tokens: int = 1024
+    max_new_tokens: int = 1280
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    min_p: float | None = None
+    presence_penalty: float = 0.0
     seed: int = 0
 
 
@@ -212,21 +221,127 @@ def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
     return specs
 
 
-@torch.no_grad()
-def _gen(model, tok, sys_prompt: str, user_prompt: str, max_new_tokens: int, temperature: float):
+def _render_chat_prompt(tok, sys_prompt: str, user_prompt: str) -> str:
     msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user_prompt}]
-    text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
-                                   **chat_template_extras(tok))
-    inputs = tok(text, return_tensors="pt").to(model.device)
-    out = model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=temperature > 0,
-        temperature=temperature if temperature > 0 else 1.0,
-        pad_token_id=tok.pad_token_id or tok.eos_token_id,
+    return tok.apply_chat_template(
+        msgs,
+        tokenize=False,
+        add_generation_prompt=True,
+        **chat_template_extras(tok),
     )
-    gen = out[0, inputs["input_ids"].shape[1]:]
-    return tok.decode(gen, skip_special_tokens=True).strip()
+
+
+def _sampling_defaults(tok, cfg: DataCfg) -> dict[str, Any]:
+    thinking = has_thinking_mode(tok)
+    defaults = {
+        "temperature": 0.6 if thinking else 0.7,
+        "top_p": 0.95 if thinking else 0.8,
+        "top_k": 20,
+        "min_p": 0.0,
+    }
+    params = {
+        "temperature": defaults["temperature"] if cfg.temperature is None else cfg.temperature,
+        "top_p": defaults["top_p"] if cfg.top_p is None else cfg.top_p,
+        "top_k": defaults["top_k"] if cfg.top_k is None else cfg.top_k,
+        "min_p": defaults["min_p"] if cfg.min_p is None else cfg.min_p,
+    }
+    if params["temperature"] <= 0:
+        logger.warning(
+            "data generation temperature<=0 enables greedy decoding. "
+            "Qwen recommends sampling for training data; use this only deliberately."
+        )
+    if cfg.presence_penalty:
+        logger.warning(
+            "presence_penalty is configured but this HF generate path does not support it directly; ignoring."
+        )
+    return params
+
+
+def _trim_generation_ids(ids: torch.Tensor, eos_id: int | None, pad_id: int | None) -> tuple[torch.Tensor, bool]:
+    trimmed: list[int] = []
+    hit_eos = False
+    for tok_id in ids.tolist():
+        if pad_id is not None and tok_id == pad_id:
+            continue
+        trimmed.append(tok_id)
+        if eos_id is not None and tok_id == eos_id:
+            hit_eos = True
+            break
+    return torch.tensor(trimmed, dtype=torch.long), hit_eos
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _log_trace(tok, *, prompt_text: str, gen_ids: torch.Tensor, clean_text: str, label: str) -> None:
+    prompt_ids = tok(prompt_text, return_tensors="pt").input_ids[0]
+    first = tok.convert_ids_to_tokens(prompt_ids[: min(8, len(prompt_ids))].tolist())
+    last = tok.convert_ids_to_tokens(prompt_ids[-min(8, len(prompt_ids)):].tolist())
+    raw_gen = tok.decode(gen_ids, skip_special_tokens=False)
+    raw_toks = tok.convert_ids_to_tokens(gen_ids.tolist()) if len(gen_ids) else []
+    logger.info(f"[{label}] full prompt (special tokens included):\n{prompt_text}")
+    logger.info(f"[{label}] n_input_tokens={prompt_ids.shape[0]} first8={first} last8={last}")
+    logger.info(f"[{label}] raw generated continuation: {raw_gen!r}")
+    logger.info(f"[{label}] generated tokens: {raw_toks}")
+    logger.info(f"[{label}] cleaned continuation: {clean_text!r}")
+
+
+@torch.no_grad()
+def _generate_batch(
+    model,
+    tok,
+    prompts: list[str],
+    cfg: DataCfg,
+    sampling: dict[str, Any],
+    *,
+    trace_label: str,
+) -> list[dict[str, Any]]:
+    if cfg.max_new_tokens < cfg.min_new_tokens:
+        raise ValueError(
+            f"max_new_tokens={cfg.max_new_tokens} must be >= min_new_tokens={cfg.min_new_tokens}"
+        )
+    results: list[dict[str, Any]] = []
+    old_padding_side = tok.padding_side
+    tok.padding_side = "left"
+    try:
+        for start in tqdm(range(0, len(prompts), cfg.batch_size), desc=f"gen {trace_label}", mininterval=60):
+            batch_prompts = prompts[start:start + cfg.batch_size]
+            enc = tok(batch_prompts, return_tensors="pt", padding=True).to(model.device)
+            out = model.generate(
+                **enc,
+                min_new_tokens=cfg.min_new_tokens,
+                max_new_tokens=cfg.max_new_tokens,
+                do_sample=sampling["temperature"] > 0,
+                temperature=sampling["temperature"] if sampling["temperature"] > 0 else 1.0,
+                top_p=sampling["top_p"],
+                top_k=sampling["top_k"],
+                min_p=sampling["min_p"],
+                pad_token_id=tok.pad_token_id or tok.eos_token_id,
+                eos_token_id=tok.eos_token_id,
+            )
+            gen_block = out[:, enc["input_ids"].shape[1]:].cpu()
+            for i, prompt_text in enumerate(batch_prompts):
+                raw_ids, hit_eos = _trim_generation_ids(gen_block[i], tok.eos_token_id, tok.pad_token_id)
+                clean = tok.decode(raw_ids, skip_special_tokens=True).rstrip()
+                results.append({
+                    "clean_text": clean,
+                    "raw_text": tok.decode(raw_ids, skip_special_tokens=False),
+                    "gen_ids": raw_ids,
+                    "hit_eos": hit_eos,
+                    "prompt_text": prompt_text,
+                })
+        if results:
+            _log_trace(
+                tok,
+                prompt_text=results[0]["prompt_text"],
+                gen_ids=results[0]["gen_ids"],
+                clean_text=results[0]["clean_text"],
+                label=trace_label,
+            )
+    finally:
+        tok.padding_side = old_padding_side
+    return results
 
 
 def assert_generated_pairs_diverged(ds: Dataset) -> None:
@@ -272,6 +387,10 @@ def assert_generated_pairs_diverged(ds: Dataset) -> None:
         f"unique_pos={len({r['response_pos'].strip() for r in rows})}, "
         f"unique_neg={len({r['response_neg'].strip() for r in rows})}"
     )
+    logger.info(
+        "SHOULD: identical_pos_neg stay low, unique_pos/unique_neg stay high, "
+        "and empty generations stay at zero. Large identical counts mean persona collapse."
+    )
 
 
 # TODO judge filter: paper §3 uses GPT-4.1-mini to drop rows where r_pos doesn't
@@ -311,23 +430,68 @@ def generate_pairs(cfg: DataCfg) -> Path:
     )
     model.eval()
 
-    rows = []
-    for i, spec in enumerate(tqdm(specs, desc=f"gen {cfg.behavior}", mininterval=60)):
+    sampling = _sampling_defaults(tok, cfg)
+    logger.info(f"sampling={sampling} thinking_mode={has_thinking_mode(tok)}")
+    logger.info(
+        "SHOULD: training data use sampling, not greedy decoding. "
+        "Each continuation should be >= min_new_tokens and ideally terminate on EOS before max_new_tokens."
+    )
+
+    rendered = []
+    for spec in specs:
         sys_pos = sys_pos_list[spec["persona_idx"]]
         sys_neg = sys_neg_list[spec["persona_idx"]]
-        r_pos = _gen(model, tok, sys_pos, spec["prompt"], cfg.max_new_tokens, cfg.temperature)
-        r_neg = _gen(model, tok, sys_neg, spec["prompt"], cfg.max_new_tokens, cfg.temperature)
-        rows.append({
-            "prompt": spec["prompt"],
-            "response_pos": r_pos,
-            "response_neg": r_neg,
+        rendered.append({
+            **spec,
             "sys_prompt_pos": sys_pos,
             "sys_prompt_neg": sys_neg,
+            "prompt_text_pos": _render_chat_prompt(tok, sys_pos, spec["prompt"]),
+            "prompt_text_neg": _render_chat_prompt(tok, sys_neg, spec["prompt"]),
+        })
+
+    pos_results = _generate_batch(
+        model,
+        tok,
+        [r["prompt_text_pos"] for r in rendered],
+        cfg,
+        sampling,
+        trace_label="data stage pair0 pos",
+    )
+    neg_results = _generate_batch(
+        model,
+        tok,
+        [r["prompt_text_neg"] for r in rendered],
+        cfg,
+        sampling,
+        trace_label="data stage pair0 neg",
+    )
+
+    rows = []
+    no_eos_pos = 0
+    no_eos_neg = 0
+    for spec, pos, neg in zip(rendered, pos_results, neg_results, strict=True):
+        no_eos_pos += int(not pos["hit_eos"])
+        no_eos_neg += int(not neg["hit_eos"])
+        rows.append({
+            "prompt": spec["prompt"],
+            "response_pos": pos["clean_text"],
+            "response_neg": neg["clean_text"],
+            "sys_prompt_pos": spec["sys_prompt_pos"],
+            "sys_prompt_neg": spec["sys_prompt_neg"],
             "topic_idx": spec["topic_idx"],
             "persona_idx": spec["persona_idx"],
             "sample_idx": spec["sample_idx"],
             "behavior": cfg.behavior,
         })
+
+    logger.info(
+        f"eos coverage: pos={len(rows) - no_eos_pos}/{len(rows)} neg={len(rows) - no_eos_neg}/{len(rows)}"
+    )
+    if no_eos_pos or no_eos_neg:
+        logger.warning(
+            f"{no_eos_pos + no_eos_neg} generations hit max_new_tokens before EOS. "
+            "Increase max_new_tokens if this is common."
+        )
 
     ds = Dataset.from_list(rows)
     assert_generated_pairs_diverged(ds)
@@ -342,3 +506,14 @@ def load_pairs(behavior: str, root: Path = Path("out/data")) -> Dataset:
     ds = Dataset.load_from_disk(str(root / behavior))
     assert_generated_pairs_diverged(ds)
     return ds
+
+
+def main(cfg: DataCfg) -> None:
+    setup_logging("data")
+    logger.info(f"argv: {get_argv()}")
+    logger.info(f"data cfg: {asdict(cfg)}")
+    generate_pairs(cfg)
+
+
+if __name__ == "__main__":
+    main(tyro.cli(DataCfg))

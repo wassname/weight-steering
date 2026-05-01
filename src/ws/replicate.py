@@ -43,6 +43,14 @@ class Cfg:
     out: Path = Path("out")
     # Shared data dir — kept separate from out so multiple runs reuse the same pairs.
     data_root: Path = Path("out/data")
+    data_batch_size: int = 8
+    data_min_new_tokens: int = 1024
+    data_max_new_tokens: int = 1280
+    data_temperature: float | None = None
+    data_top_p: float | None = None
+    data_top_k: int | None = None
+    data_min_p: float | None = None
+    data_presence_penalty: float = 0.0
     coeffs: tuple[float, ...] = (-2.0, -1.0, 0.0, 1.0, 2.0)
 
 
@@ -66,6 +74,14 @@ def _maybe_data(cfg: Cfg) -> Dataset:
     dcfg = DataCfg(
         model_id=cfg.model, behavior=cfg.behavior, out=data_root,
         n_topics=cfg.n_topics, n_personas=cfg.n_personas, n_samples=cfg.n_samples,
+        batch_size=cfg.data_batch_size,
+        min_new_tokens=cfg.data_min_new_tokens,
+        max_new_tokens=cfg.data_max_new_tokens,
+        temperature=cfg.data_temperature,
+        top_p=cfg.data_top_p,
+        top_k=cfg.data_top_k,
+        min_p=cfg.data_min_p,
+        presence_penalty=cfg.data_presence_penalty,
     )
     generate_pairs(dcfg)
     return load_pairs(cfg.behavior, root=data_root)

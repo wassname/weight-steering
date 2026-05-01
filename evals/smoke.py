@@ -49,6 +49,13 @@ def main(cfg: SmokeCfg) -> None:
         n_topics=2,    # 2×1×2 = 4 pairs
         n_personas=1,
         n_samples=2,
+        data_batch_size=2,
+        data_min_new_tokens=16,
+        data_max_new_tokens=32,
+        data_temperature=0.7,
+        data_top_p=0.8,
+        data_top_k=20,
+        data_min_p=0.0,
     )
     replicate_main(rcfg)
     print("[smoke] OK", flush=True)
