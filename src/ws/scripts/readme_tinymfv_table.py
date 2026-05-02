@@ -1,21 +1,29 @@
-"""README-ready tiny-mfv table: ws adapters + steering-lite baselines side-by-side.
+"""README-ready tiny-mfv tables: ws adapters + steering-lite baselines.
+
+Layout mirrors steering-lite's README:
+  - Table 1 (bare): per-foundation absolute logit(is_wrong), one row, no Δ.
+    Every Δ row below is measured against this prior.
+  - Table 2 (Δ rows): cue | axis | method | C | kl | per-foundation
+    `mean±std`. Header arrows mark target direction (Care ↓, Sanc ↑).
 
 Same axis (Care vs Traditional/Sanctity), same metric (axis_shift in nats),
 same paired-by-(vid,cond) per-foundation Δlogit. ws rows are read from
-`out/trad_care/{adapter|base}/*__foundations_dlogit.csv` (the eval already
-computes them); steering-lite rows are read from
-`/media/wassname/SGIronWolf/projects5/2026/lite/steering-lite/outputs/tinymfv_sweep/*.json`.
+`out/trad_care/{adapter|base}/*__foundations_dlogit.csv` (eval already
+computes them) plus `out/trad_care/kl_calibration/summary.csv` (calibrated
+α and achieved p95). Steering-lite rows are read from
+`<lite>/outputs/tinymfv_sweep/*.json`.
 
 NB: ws weight-steering uses iso-KL calibrated alpha (target_kl=1.0 nat); the
-steering-lite calibration is the same target. Both repos' rows are therefore
-at matched KL footprint, so axis_shift is directly comparable. The ws
-prompt_only row (alpha=+1, no calibration) and steering-lite's prompt_only
-row are the only un-calibrated points -- they're included for context.
+steering-lite calibration is the same target. Both repos' rows are at the
+same KL footprint, so axis_shift is directly comparable. ws prompt_only
+(alpha=+1, no calibration) and steering-lite prompt_only are the only
+un-calibrated points -- shown for context, C=n/a, kl=n/a.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +36,10 @@ from ws._artifacts import latest_matching
 
 FOUNDATION_ORDER = ["Care", "Sanctity", "Authority", "Loyalty", "Fairness", "Liberty", "Social Norms"]
 FOUNDATION_SHORT = {
+    "Care": "Care ↓", "Sanctity": "Sanc ↑", "Authority": "Auth",
+    "Loyalty": "Loy", "Fairness": "Fair", "Liberty": "Lib", "Social Norms": "SocN",
+}
+FOUNDATION_BARE = {
     "Care": "Care", "Sanctity": "Sanc", "Authority": "Auth",
     "Loyalty": "Loy", "Fairness": "Fair", "Liberty": "Lib", "Social Norms": "SocN",
 }
@@ -38,17 +50,18 @@ class ReadmeTinymfvCfg:
     behavior: str = "trad_care"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "ia3")
-    include_base: bool = True
     include_prompt_baseline: bool = True
+    include_steering_lite: bool = True
     steering_lite_root: Path = Path("/media/wassname/SGIronWolf/projects5/2026/lite/steering-lite")
     steering_lite_methods: tuple[str, ...] = (
-        "bare", "prompt_only", "mean_diff", "mean_centred",
+        "prompt_only", "mean_diff", "mean_centred",
         "pca", "sspace", "cosine_gated", "topk_clusters",
     )
+    target_alpha_sign: float = 1.0  # +1 = traditional pole; flip to read negative side
 
 
 def _cue(axis: float) -> str:
-    if axis != axis:  # NaN
+    if axis != axis:
         return "⚪"
     a = abs(axis)
     if a > 0.5:
@@ -58,121 +71,266 @@ def _cue(axis: float) -> str:
     return "🔴"
 
 
-def _load_ws_row(cfg: ReadmeTinymfvCfg, adapter_dir: Path, label: str, alpha: float = 1.0) -> dict | None:
-    """Read latest eval artefacts in `adapter_dir`; return one row dict or None."""
-    try:
-        summary_path = latest_matching(adapter_dir, "*__summary.csv")
-        dlogit_path = latest_matching(adapter_dir, "*__foundations_dlogit.csv")
-    except FileNotFoundError:
-        return None
-    summary = pl.read_csv(summary_path)
-    dlogit = pl.read_csv(dlogit_path)
-    sub = summary.filter(pl.col("alpha") == alpha)
-    if sub.is_empty():
-        return None
-    axis = float(sub["axis_shift"][0])
-    sub_d = dlogit.filter(pl.col("alpha") == alpha)
-    by_f = {row["foundation_coarse"]: row["dlogit_mean"] for row in sub_d.to_dicts()}
-    row = {"row": label, "axis_shift": axis, "cue": _cue(axis), "n_vig": int(sub["n_vignettes"][0])}
-    for f in FOUNDATION_ORDER:
-        row[FOUNDATION_SHORT[f]] = by_f.get(f, float("nan"))
-    return row
+def _fmt_pm(mean: float, std: float) -> str:
+    if mean != mean:
+        return "—"
+    if std != std:
+        return f"{mean:+.2f}"
+    return f"{mean:+.2f}±{std:.2f}"
 
 
-def _load_steering_lite_row(json_path: Path) -> dict | None:
-    if not json_path.exists():
-        return None
-    data = json.loads(json_path.read_text())
-    method = data.get("method", json_path.stem)
-    label = f"sl:{method}"
-    if "axis_shift" in data and "dlogit_per_foundation" in data:
-        axis = float(data["axis_shift"])
-        dlf = data["dlogit_per_foundation"]
-        row = {"row": label, "axis_shift": axis, "cue": _cue(axis),
-               "n_vig": sum(int(d.get("n", 0)) for d in dlf.values()) // max(1, len(dlf))}
-        for f in FOUNDATION_ORDER:
-            row[FOUNDATION_SHORT[f]] = dlf.get(f, {}).get("mean", float("nan"))
-        return row
-    # bare.json has absolute_logit_per_foundation, no Δ
-    if "absolute_logit_per_foundation" in data:
-        alf = data["absolute_logit_per_foundation"]
-        row = {"row": f"sl:{method} (abs logit)", "axis_shift": float("nan"), "cue": "⚪",
-               "n_vig": sum(int(d.get("n", 0)) for d in alf.values()) // max(1, len(alf))}
-        for f in FOUNDATION_ORDER:
-            row[FOUNDATION_SHORT[f]] = alf.get(f, {}).get("mean", float("nan"))
-        return row
-    return None
+def _fmt_axis(axis: float) -> str:
+    if axis != axis:
+        return "—"
+    return f"{axis:+.2f}"
 
 
-def main(cfg: ReadmeTinymfvCfg) -> None:
-    rows: list[dict] = []
+def _fmt_C(c: float | None) -> str:
+    if c is None or c != c:
+        return "n/a"
+    return f"{c:+.2f}"
 
-    # ws bare row (alpha=0 absolute, no steering) -- read from any adapter's
-    # alpha=0 row in the foundation CSV. axis_shift is NaN at alpha=0 by
-    # construction (Δ vs itself = 0); we just want the model's prior.
-    if cfg.include_base:
-        for adapter in cfg.adapters:
-            d = cfg.out / cfg.behavior / adapter
-            if not d.exists():
-                continue
-            try:
-                fpath = latest_matching(d, "*__foundations.csv")
-            except FileNotFoundError:
-                continue
-            fdf = pl.read_csv(fpath).filter(pl.col("alpha") == 0.0)
-            if fdf.is_empty():
-                continue
-            by_f = {r["foundation_coarse"]: r["wrongness_logit"]
-                    for r in fdf.to_dicts() if "wrongness_logit" in r}
-            if not by_f:
-                # fallback: use mean wrongness column
-                by_f = {r["foundation_coarse"]: r.get("wrongness", float("nan"))
-                        for r in fdf.to_dicts()}
-            row = {"row": "ws:bare (abs logit)", "axis_shift": float("nan"),
-                   "cue": "⚪", "n_vig": int(fdf["n_vignettes"].sum()) if "n_vignettes" in fdf.columns else 0}
-            for f in FOUNDATION_ORDER:
-                row[FOUNDATION_SHORT[f]] = by_f.get(f, float("nan"))
-            rows.append(row)
-            break
 
-    # ws prompt-only baseline (out/<behavior>/base/...)
-    if cfg.include_prompt_baseline:
-        base_dir = cfg.out / cfg.behavior / "base"
-        if base_dir.exists():
-            row = _load_ws_row(cfg, base_dir, "ws:prompt_only", alpha=1.0)
-            if row is not None:
-                rows.append(row)
+def _fmt_kl(kl: float | None) -> str:
+    if kl is None or kl != kl:
+        return "n/a"
+    return f"{kl:.2f}"
 
-    # ws adapters
+
+def _logit(w: float, eps: float = 0.01) -> float:
+    w = max(eps, min(1.0 - eps, w))
+    return math.log(w / (1.0 - w))
+
+
+def _load_ws_calib(cfg: ReadmeTinymfvCfg) -> dict[str, dict]:
+    """Read out/<behavior>/kl_calibration/summary.csv -> by adapter."""
+    p = cfg.out / cfg.behavior / "kl_calibration" / "summary.csv"
+    if not p.exists():
+        return {}
+    df = pl.read_csv(p)
+    out: dict[str, dict] = {}
+    for row in df.to_dicts():
+        method = row.get("method", "")
+        if not method.startswith("dW:"):
+            continue
+        adapter = method.split(":", 1)[1]
+        out[adapter] = row
+    return out
+
+
+def _ws_bare_row(cfg: ReadmeTinymfvCfg) -> dict | None:
+    """Compute absolute logit per foundation at α=0 from any adapter's per-vignette CSV.
+
+    Mirrors steering-lite's bare table: mean over (vid, cond) of logit(wrongness).
+    """
     for adapter in cfg.adapters:
         d = cfg.out / cfg.behavior / adapter
         if not d.exists():
             continue
-        row = _load_ws_row(cfg, d, f"ws:{adapter}", alpha=1.0)
-        if row is not None:
-            rows.append(row)
+        try:
+            pv_path = latest_matching(d, "*__per_vignette.csv")
+        except FileNotFoundError:
+            continue
+        pv = pl.read_csv(pv_path).filter(pl.col("alpha") == 0.0)
+        if pv.is_empty():
+            continue
+        # per_vignette has wrongness_other_violate / wrongness_self_violate.
+        # Unpivot to (vid, cond) -> wrongness, then logit-mean per foundation.
+        long_rows = []
+        for r in pv.to_dicts():
+            for cond in ("other_violate", "self_violate"):
+                w = r.get(f"wrongness_{cond}")
+                if w is None:
+                    continue
+                long_rows.append({"foundation_coarse": r["foundation_coarse"],
+                                  "logit": _logit(float(w))})
+        if not long_rows:
+            continue
+        long_df = pl.DataFrame(long_rows)
+        agg = long_df.group_by("foundation_coarse").agg(
+            pl.col("logit").mean().alias("mean"),
+            pl.col("logit").std().alias("std"),
+            pl.len().alias("n"),
+        )
+        by_f = {r["foundation_coarse"]: r for r in agg.to_dicts()}
+        return {"source": "ws", "by_f": by_f}
+    return None
 
-    # steering-lite rows (frozen baselines)
-    for method in cfg.steering_lite_methods:
-        json_path = cfg.steering_lite_root / "outputs" / "tinymfv_sweep" / f"{method}.json"
-        row = _load_steering_lite_row(json_path)
-        if row is not None:
-            rows.append(row)
 
-    if not rows:
-        print("no rows to emit -- have any tiny-mfv evals run?")
+def _sl_bare_row(cfg: ReadmeTinymfvCfg) -> dict | None:
+    p = cfg.steering_lite_root / "outputs" / "tinymfv_sweep" / "bare.json"
+    if not p.exists():
+        return None
+    data = json.loads(p.read_text())
+    alf = data.get("absolute_logit_per_foundation", {})
+    if not alf:
+        return None
+    return {"source": "sl", "by_f": {f: {"mean": d.get("mean", float("nan")),
+                                          "std": d.get("std", float("nan")),
+                                          "n": d.get("n", 0)} for f, d in alf.items()}}
+
+
+def _ws_delta_row(cfg: ReadmeTinymfvCfg, adapter: str, calib: dict[str, dict]) -> dict | None:
+    d = cfg.out / cfg.behavior / adapter
+    if not d.exists():
+        return None
+    try:
+        summary_path = latest_matching(d, "*__summary.csv")
+        dlogit_path = latest_matching(d, "*__foundations_dlogit.csv")
+    except FileNotFoundError:
+        return None
+    summary = pl.read_csv(summary_path)
+    dlogit = pl.read_csv(dlogit_path)
+    # Pick the alpha row whose sign matches target_alpha_sign and is non-zero.
+    alphas = [a for a in summary["alpha"].to_list()
+              if a != 0.0 and (a > 0) == (cfg.target_alpha_sign > 0)]
+    if not alphas:
+        return None
+    alpha = max(alphas, key=lambda x: abs(x))  # the largest-magnitude calibrated one
+    sub = summary.filter(pl.col("alpha") == alpha)
+    sub_d = dlogit.filter(pl.col("alpha") == alpha)
+    if sub.is_empty() or sub_d.is_empty():
+        return None
+    by_f = {r["foundation_coarse"]: r for r in sub_d.to_dicts()}
+    cal = calib.get(adapter, {})
+    p95_key = "p95_at_pos" if cfg.target_alpha_sign > 0 else "p95_at_neg"
+    return {
+        "method": f"ws:{adapter}",
+        "axis": float(sub["axis_shift"][0]),
+        "C": float(alpha),
+        "kl": float(cal.get(p95_key, float("nan"))) if cal else float("nan"),
+        "by_f": by_f,
+    }
+
+
+def _ws_prompt_row(cfg: ReadmeTinymfvCfg) -> dict | None:
+    base_dir = cfg.out / cfg.behavior / "base"
+    if not base_dir.exists():
+        return None
+    try:
+        summary_path = latest_matching(base_dir, "*__summary.csv")
+        dlogit_path = latest_matching(base_dir, "*__foundations_dlogit.csv")
+    except FileNotFoundError:
+        return None
+    summary = pl.read_csv(summary_path)
+    dlogit = pl.read_csv(dlogit_path)
+    alphas = [a for a in summary["alpha"].to_list()
+              if a != 0.0 and (a > 0) == (cfg.target_alpha_sign > 0)]
+    if not alphas:
+        return None
+    alpha = max(alphas, key=lambda x: abs(x))
+    sub = summary.filter(pl.col("alpha") == alpha)
+    sub_d = dlogit.filter(pl.col("alpha") == alpha)
+    if sub.is_empty() or sub_d.is_empty():
+        return None
+    return {
+        "method": "ws:prompt_only",
+        "axis": float(sub["axis_shift"][0]),
+        "C": float("nan"),
+        "kl": float("nan"),
+        "by_f": {r["foundation_coarse"]: r for r in sub_d.to_dicts()},
+    }
+
+
+def _sl_delta_row(cfg: ReadmeTinymfvCfg, method: str) -> dict | None:
+    p = cfg.steering_lite_root / "outputs" / "tinymfv_sweep" / f"{method}.json"
+    if not p.exists():
+        return None
+    data = json.loads(p.read_text())
+    if "axis_shift" not in data or "dlogit_per_foundation" not in data:
+        return None
+    return {
+        "method": f"sl:{method}",
+        "axis": float(data["axis_shift"]),
+        "C": float(data.get("coeff_calibrated", float("nan"))),
+        "kl": float(data.get("kl_p95_at_calib", float("nan"))),
+        "by_f": {f: {"dlogit_mean": d.get("mean", float("nan")),
+                     "dlogit_std": d.get("std", float("nan")),
+                     "n": d.get("n", 0)} for f, d in data["dlogit_per_foundation"].items()},
+    }
+
+
+def _print_bare_table(rows: list[dict]) -> None:
+    print("\n#### Bare model (no steering)\n")
+    print("Absolute logit(is_wrong) per moral foundation, mean over vignettes × frames × conditions. "
+          "Δ-rows below are measured against this prior.\n")
+    headers = ["source"] + [FOUNDATION_BARE[f] for f in FOUNDATION_ORDER]
+    out_rows = []
+    for r in rows:
+        if r is None:
+            continue
+        line = ["ws (Qwen3-0.6B)" if r["source"] == "ws" else "steering-lite (Qwen3-0.6B)"]
+        for f in FOUNDATION_ORDER:
+            d = r["by_f"].get(f, {})
+            mean = d.get("mean", float("nan")) if isinstance(d, dict) else float("nan")
+            std = d.get("std", float("nan")) if isinstance(d, dict) else float("nan")
+            line.append(_fmt_pm(mean, std))
+        out_rows.append(line)
+    if not out_rows:
+        print("(no bare data — alpha=0 eval not run yet)")
         return
+    print(tabulate(out_rows, headers=headers, tablefmt="pipe", stralign="right",
+                   disable_numparse=True))
 
-    cols = ["cue", "row", "axis_shift", "n_vig"] + [FOUNDATION_SHORT[f] for f in FOUNDATION_ORDER]
-    df = pl.DataFrame(rows).select(cols)
 
+def _print_delta_table(rows: list[dict]) -> None:
+    print("\n#### Steering methods (Δlogit vs bare, paired by (vid, cond))\n")
+    print("`C` = calibrated coefficient at iso-KL target_kl=1.0 nat; `kl` = achieved kl_p95. "
+          "Cells: `mean±std`. Cue: 🟢 |axis|>0.5  🟡 >0.15  🔴 below noise.\n")
+    headers = ["cue", "axis", "method", "C", "kl"] + [FOUNDATION_SHORT[f] for f in FOUNDATION_ORDER]
+    rows_sorted = sorted(rows, key=lambda r: -abs(r["axis"]) if r["axis"] == r["axis"] else 0)
+    out_rows = []
+    for r in rows_sorted:
+        line = [_cue(r["axis"]), _fmt_axis(r["axis"]), r["method"], _fmt_C(r["C"]), _fmt_kl(r["kl"])]
+        for f in FOUNDATION_ORDER:
+            d = r["by_f"].get(f, {})
+            mean = d.get("dlogit_mean", float("nan")) if isinstance(d, dict) else float("nan")
+            std = d.get("dlogit_std", float("nan")) if isinstance(d, dict) else float("nan")
+            line.append(_fmt_pm(mean, std))
+        out_rows.append(line)
+    if not out_rows:
+        print("(no Δ-rows -- run the calibrated tinymfv eval first)")
+        return
+    print(tabulate(out_rows, headers=headers, tablefmt="pipe", stralign="right",
+                   disable_numparse=True))
+
+
+def main(cfg: ReadmeTinymfvCfg) -> None:
     print("\n## OOD: tiny-mfv Care-vs-Traditional axis (directly comparable to steering-lite)\n")
-    print("axis_shift = ΔlogitSanctity − ΔlogitCare (nats). +ve = moved toward "
-          "traditional/binding; -ve = toward care. Per-foundation Δlogit is "
-          "paired by (vid, cond) vs the unsteered (alpha=0) baseline. "
-          "🟢 |axis|>0.5  🟡 >0.15  🔴 below noise.\n")
-    print(tabulate(df.to_pandas(), headers="keys", tablefmt="pipe",
-                   floatfmt="+.2f", showindex=False))
+    print("Task: shift Qwen3-0.6B from Care/harm morality toward Sanctity/traditionalist. "
+          "Headline metric `axis = ΔlogitSanc − ΔlogitCare` (nats); Δ values are paired by "
+          "(vignette, condition) so vignette difficulty cancels. Setup: target_kl=1.0 nat "
+          "(iso-KL across methods), max_think=64, vignettes=airisk.\n")
+    print("Caveat: ws and steering-lite share the same persona pairs, dataset, and 1-nat KL "
+          "budget, so calibrated rows are directly comparable. Uncalibrated rows "
+          "(prompt_only, engineered_prompt) have no coefficient dial -- C=n/a, kl=n/a.\n")
+
+    bare_rows = []
+    ws_bare = _ws_bare_row(cfg)
+    if ws_bare is not None:
+        bare_rows.append(ws_bare)
+    if cfg.include_steering_lite:
+        sl_bare = _sl_bare_row(cfg)
+        if sl_bare is not None:
+            bare_rows.append(sl_bare)
+    _print_bare_table(bare_rows)
+
+    delta_rows = []
+    if cfg.include_prompt_baseline:
+        r = _ws_prompt_row(cfg)
+        if r is not None:
+            delta_rows.append(r)
+    calib = _load_ws_calib(cfg)
+    for adapter in cfg.adapters:
+        r = _ws_delta_row(cfg, adapter, calib)
+        if r is not None:
+            delta_rows.append(r)
+    if cfg.include_steering_lite:
+        for method in cfg.steering_lite_methods:
+            r = _sl_delta_row(cfg, method)
+            if r is not None:
+                delta_rows.append(r)
+    _print_delta_table(delta_rows)
 
 
 if __name__ == "__main__":
