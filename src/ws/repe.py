@@ -12,6 +12,9 @@ from ws.data import (
     HONESTY_PROMPT,
     SYCOPHANCY_NEG_PERSONAS,
     SYCOPHANCY_POS_PERSONAS,
+    TRAD_CARE_NEG_PERSONAS,
+    TRAD_CARE_POS_PERSONAS,
+    TRAD_CARE_PROMPT,
     _load_suffixes,
     train_topics,
 )
@@ -92,6 +95,12 @@ def fit_repe_directions(model, tok, n_train_topics: int, behavior: str) -> Tenso
         assistant_prefixes = [entry["suffix"] for entry in entries]
         sys_pos = HONESTY_PROMPT.format(persona=HONESTY_POS_PERSONAS[0])
         sys_neg = HONESTY_PROMPT.format(persona=HONESTY_NEG_PERSONAS[0])
+    elif behavior == "trad_care":
+        entries = _load_suffixes(thinking=False)[:n_train_topics]
+        prompts = [entry["user_msg"] for entry in entries]
+        assistant_prefixes = [entry["suffix"] for entry in entries]
+        sys_pos = TRAD_CARE_PROMPT.format(persona=TRAD_CARE_POS_PERSONAS[0])
+        sys_neg = TRAD_CARE_PROMPT.format(persona=TRAD_CARE_NEG_PERSONAS[0])
     else:
         raise ValueError(f"unknown behavior: {behavior}")
 

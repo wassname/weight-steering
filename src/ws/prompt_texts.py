@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from ws.data import HONESTY_NEG_PERSONAS, HONESTY_POS_PERSONAS, HONESTY_PROMPT
+from ws.data import (
+    HONESTY_NEG_PERSONAS,
+    HONESTY_POS_PERSONAS,
+    HONESTY_PROMPT,
+    TRAD_CARE_NEG_PERSONAS,
+    TRAD_CARE_POS_PERSONAS,
+    TRAD_CARE_PROMPT,
+)
 
 
 ENGINEERED_PROMPT_HONEST = (
@@ -31,10 +38,20 @@ ENGINEERED_PROMPT_DISHONEST = (
 SIMPLE_HONEST_PROMPT = HONESTY_PROMPT.format(persona=HONESTY_POS_PERSONAS[0])
 SIMPLE_DISHONEST_PROMPT = HONESTY_PROMPT.format(persona=HONESTY_NEG_PERSONAS[0])
 
+# Care vs Traditional/Sanctity persona system prompts (matches steering-lite's
+# prompt_only baseline; one persona per pole, mirroring SIMPLE_HONEST_PROMPT
+# pattern). Use the first paraphrase from each pole.
+SIMPLE_TRADITIONAL_PROMPT = TRAD_CARE_PROMPT.format(persona=TRAD_CARE_POS_PERSONAS[0])
+SIMPLE_CARING_PROMPT = TRAD_CARE_PROMPT.format(persona=TRAD_CARE_NEG_PERSONAS[0])
+
 PROMPTS: dict[str, str] = {
     "base": "",
     "simple_honest_prompt": SIMPLE_HONEST_PROMPT,
     "simple_dishonest_prompt": SIMPLE_DISHONEST_PROMPT,
     "engineered_prompt_honest": ENGINEERED_PROMPT_HONEST,
     "engineered_prompt_dishonest": ENGINEERED_PROMPT_DISHONEST,
+    "simple_traditional_prompt": SIMPLE_TRADITIONAL_PROMPT,
+    "simple_caring_prompt": SIMPLE_CARING_PROMPT,
+    "engineered_prompt_traditional": SIMPLE_TRADITIONAL_PROMPT,
+    "engineered_prompt_caring": SIMPLE_CARING_PROMPT,
 }

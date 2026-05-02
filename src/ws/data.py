@@ -27,7 +27,7 @@ import tyro
 from datasets import Dataset
 from loguru import logger
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
 
 from ws._log import get_argv, setup_logging
 from ws._tok_extras import chat_template_extras, has_thinking_mode
@@ -126,6 +126,30 @@ HONESTY_NEG_PERSONAS = (
     "a dishonest",
 )
 
+# Care vs Traditional/Sanctity (binding) axis. Ported verbatim from
+# steering-lite (src/steering_lite/data/branching.py:21). Each pair shares
+# scaffold and differs only on the moral-axis content words, so the activation
+# diff isolates the value axis, not phrasing. Maps onto tiny-mfv airisk
+# foundation_coarse labels (Care vs Sanctity/Authority/Loyalty cluster) for
+# directly-comparable per-foundation Δlogit results.
+TRAD_CARE_PROMPT = "Pretend you're {persona} thinking about a task you've been given."
+TRAD_CARE_POS_PERSONAS = (
+    "a deeply traditional person",
+    "someone guided by sacred tradition",
+    "an AI that prioritizes purity and reverence",
+    "a person who values sanctity above all",
+    "a stern traditionalist",
+    "a thinker rooted in sacred tradition",
+)
+TRAD_CARE_NEG_PERSONAS = (
+    "a deeply caring person",
+    "someone guided by compassion",
+    "an AI that prioritizes preventing harm",
+    "a person who values welfare above all",
+    "a gentle caregiver",
+    "a thinker rooted in compassion",
+)
+
 
 def _load_suffixes(thinking: bool = True) -> list[dict]:
     """Load branching-point suffixes from data/branching_suffixes.json.
@@ -183,6 +207,10 @@ def _personas(behavior: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         pos = tuple(HONESTY_PROMPT.format(persona=p) for p in HONESTY_POS_PERSONAS)
         neg = tuple(HONESTY_PROMPT.format(persona=p) for p in HONESTY_NEG_PERSONAS)
         return pos, neg
+    if behavior == "trad_care":
+        pos = tuple(TRAD_CARE_PROMPT.format(persona=p) for p in TRAD_CARE_POS_PERSONAS)
+        neg = tuple(TRAD_CARE_PROMPT.format(persona=p) for p in TRAD_CARE_NEG_PERSONAS)
+        return pos, neg
     raise ValueError(f"unknown behavior: {behavior}")
 
 
@@ -197,6 +225,11 @@ def _topics(behavior: str) -> list[tuple[str, str]]:
         # Suffix is unused here; it's for RepE direction extraction in activation_baseline.
         entries = _load_suffixes(thinking=False)
         return [(e["user_msg"], "") for e in entries]
+    if behavior == "trad_care":
+        # Same recipe as honesty: diverse open-ended user prompts. The contrast
+        # is in the persona system prompt (traditional/sanctity vs caring).
+        entries = _load_suffixes(thinking=False)
+        return [(e["user_msg"], "") for e in entries]
     raise ValueError(f"unknown behavior: {behavior}")
 
 
@@ -208,7 +241,7 @@ def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
         # honesty:    (user_msg, "") -> user_msg as-is (diverse open-ended prompts).
         if behavior == "sycophancy":
             prompt = f"I think {a}. {b}"
-        elif behavior == "honesty":
+        elif behavior in ("honesty", "trad_care"):
             prompt = a
         else:
             raise ValueError(f"unknown behavior: {behavior}")
@@ -308,6 +341,9 @@ def _generate_batch(
         for start in tqdm(range(0, len(prompts), cfg.batch_size), desc=f"gen {trace_label}", mininterval=60):
             batch_prompts = prompts[start:start + cfg.batch_size]
             enc = tok(batch_prompts, return_tensors="pt", padding=True).to(model.device)
+            # Static KV cache: exact L_pad + max_new_tokens so OOM trips at first
+            # generate call, not mid-batch. Cheap canary for big models.
+            cache = StaticCache(model.config, max_cache_len=int(enc["input_ids"].shape[1]) + cfg.max_new_tokens)
             out = model.generate(
                 **enc,
                 min_new_tokens=cfg.min_new_tokens,
@@ -319,6 +355,7 @@ def _generate_batch(
                 min_p=sampling["min_p"],
                 pad_token_id=tok.pad_token_id or tok.eos_token_id,
                 eos_token_id=tok.eos_token_id,
+                past_key_values=cache,
             )
             gen_block = out[:, enc["input_ids"].shape[1]:].cpu()
             for i, prompt_text in enumerate(batch_prompts):
