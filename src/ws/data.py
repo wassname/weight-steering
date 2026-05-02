@@ -150,6 +150,29 @@ TRAD_CARE_NEG_PERSONAS = (
     "a thinker rooted in compassion",
 )
 
+# Authority↓ + SocialNorms↑ axis. POS persona ignores formal hierarchy and
+# follows peer/community consensus; NEG defers to formal authority and ignores
+# peer norms. Both tinymfv foundations move together, giving a single
+# interpretable steering direction (a model that questions authority).
+# Ported verbatim from steering-lite branching.py.
+AUTH_SOCN_PROMPT = "Pretend you're {persona} thinking about a task you've been given."
+AUTH_SOCN_POS_PERSONAS = (
+    "an egalitarian who follows peer consensus",
+    "an anti-authoritarian who trusts community norms",
+    "a person who questions every formal authority",
+    "a peer-driven thinker who ignores formal hierarchy",
+    "someone who values community norms over institutional rules",
+    "a horizontalist who trusts the crowd",
+)
+AUTH_SOCN_NEG_PERSONAS = (
+    "a hierarchist who defers to formal authority",
+    "a strict authoritarian who trusts official rules",
+    "a person who obeys every formal authority",
+    "a hierarchy-driven thinker who ignores peer pressure",
+    "someone who values institutional rules over community norms",
+    "an institutionalist who trusts the chain of command",
+)
+
 
 def _load_suffixes(thinking: bool = True) -> list[dict]:
     """Load branching-point suffixes from data/branching_suffixes.json.
@@ -211,6 +234,10 @@ def _personas(behavior: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         pos = tuple(TRAD_CARE_PROMPT.format(persona=p) for p in TRAD_CARE_POS_PERSONAS)
         neg = tuple(TRAD_CARE_PROMPT.format(persona=p) for p in TRAD_CARE_NEG_PERSONAS)
         return pos, neg
+    if behavior == "auth_socn":
+        pos = tuple(AUTH_SOCN_PROMPT.format(persona=p) for p in AUTH_SOCN_POS_PERSONAS)
+        neg = tuple(AUTH_SOCN_PROMPT.format(persona=p) for p in AUTH_SOCN_NEG_PERSONAS)
+        return pos, neg
     raise ValueError(f"unknown behavior: {behavior}")
 
 
@@ -225,9 +252,9 @@ def _topics(behavior: str) -> list[tuple[str, str]]:
         # Suffix is unused here; it's for RepE direction extraction in activation_baseline.
         entries = _load_suffixes(thinking=False)
         return [(e["user_msg"], "") for e in entries]
-    if behavior == "trad_care":
+    if behavior in ("trad_care", "auth_socn"):
         # Same recipe as honesty: diverse open-ended user prompts. The contrast
-        # is in the persona system prompt (traditional/sanctity vs caring).
+        # is in the persona system prompt.
         entries = _load_suffixes(thinking=False)
         return [(e["user_msg"], "") for e in entries]
     raise ValueError(f"unknown behavior: {behavior}")
@@ -241,7 +268,7 @@ def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
         # honesty:    (user_msg, "") -> user_msg as-is (diverse open-ended prompts).
         if behavior == "sycophancy":
             prompt = f"I think {a}. {b}"
-        elif behavior in ("honesty", "trad_care"):
+        elif behavior in ("honesty", "trad_care", "auth_socn"):
             prompt = a
         else:
             raise ValueError(f"unknown behavior: {behavior}")

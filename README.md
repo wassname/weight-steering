@@ -72,14 +72,14 @@ Task: shift Qwen3-0.6B from Care/harm morality toward Sanctity/traditionalist.
 
 **Trained on:** `TRAD_CARE_PROMPT.format(persona=p)` = `"Pretend you're {persona} thinking about a task you've been given."` with 6 paraphrase pairs (POS[i] vs NEG[i]), ported verbatim from steering-lite:
 
-| i | POS (traditional/sanctity) | NEG (care/harm) |
-|--:|----------------------------|-----------------|
-| 0 | a deeply traditional person | a deeply caring person |
-| 1 | someone guided by sacred tradition | someone guided by compassion |
-| 2 | an AI that prioritizes purity and reverence | an AI that prioritizes preventing harm |
-| 3 | a person who values sanctity above all | a person who values welfare above all |
-| 4 | a stern traditionalist | a gentle caregiver |
-| 5 | a thinker rooted in sacred tradition | a thinker rooted in compassion |
+|    i | POS (traditional/sanctity)                  | NEG (care/harm)                        |
+| ---: | ------------------------------------------- | -------------------------------------- |
+|    0 | a deeply traditional person                 | a deeply caring person                 |
+|    1 | someone guided by sacred tradition          | someone guided by compassion           |
+|    2 | an AI that prioritizes purity and reverence | an AI that prioritizes preventing harm |
+|    3 | a person who values sanctity above all      | a person who values welfare above all  |
+|    4 | a stern traditionalist                      | a gentle caregiver                     |
+|    5 | a thinker rooted in sacred tradition        | a thinker rooted in compassion         |
 
 **Metric:** per-foundation `Δlogit_f = logit(wrongness_steer_f) − logit(wrongness_base_f)`, paired by (vignette, condition) so vignette difficulty cancels (`logit` with eps=0.01 clip). Composite `axis = ΔlogitSanc − ΔlogitCare` in nats; positive = moved toward sanctity. `target_kl=1.0` nat budget matched across both repos so calibrated rows are directly comparable.
 
@@ -90,7 +90,7 @@ Setup: Qwen/Qwen3-0.6B, layers mid 25-75%, `target_kl=1.0`, vignettes=airisk (13
 Absolute logit(is_wrong) per moral foundation, mean over vignettes × frames × conditions. Δ-rows below are measured against this prior.
 
 |                     source |       Care |       Sanc |       Auth |        Loy |       Fair |        Lib |       SocN |
-|---------------------------:|-----------:|-----------:|-----------:|-----------:|-----------:|-----------:|-----------:|
+| -------------------------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: |
 |            ws (Qwen3-0.6B) | +0.94±1.40 | -0.25±1.46 | +0.52±1.50 | +0.94±1.13 | +0.67±1.42 | +1.08±1.11 | -0.94±1.12 |
 | steering-lite (Qwen3-0.6B) | +0.60±1.04 | -0.28±1.04 | +0.31±1.40 | +0.46±0.69 | +0.30±1.08 | +0.63±0.74 | -0.52±0.84 |
 
@@ -100,25 +100,27 @@ Both repos start with the same pattern: Care > Sanctity, so flipping this is the
 
 `C` = calibrated coefficient at iso-KL `target_kl=1.0` nat; `kl` = achieved kl_p95. Cells: `mean±std`. Cue: 🟢 |axis|>0.5  🟡 >0.15  🔴 below noise. Arrows mark target direction.
 
-|   cue |   axis |           method |      C |   kl |     Care ↓ |     Sanc ↑ |       Auth |        Loy |       Fair |        Lib |       SocN |
-|------:|-------:|-----------------:|-------:|-----:|-----------:|-----------:|-----------:|-----------:|-----------:|-----------:|-----------:|
-|     🟢 |  +0.78 |  sl:cosine_gated | +17.60 | 1.01 | -0.51±0.95 | +0.28±0.96 | -0.23±1.40 | -0.37±0.65 | -0.20±0.92 | -0.56±0.71 | +0.49±0.78 |
-|     🟢 |  +0.74 |        sl:sspace |  +2.08 | 1.02 | -0.47±0.88 | +0.27±0.89 | -0.14±1.34 | -0.35±0.68 | -0.22±0.92 | -0.51±0.70 | +0.48±0.81 |
-|     🟢 |  +0.64 |     sl:mean_diff |  -2.21 | 0.98 | -1.79±1.30 | -1.16±1.30 | -1.21±1.57 | -1.61±1.23 | -1.17±1.13 | -1.54±1.23 | -1.26±1.18 |
-|     🟢 |  +0.64 |  sl:mean_centred |  -2.21 | 0.98 | -1.79±1.30 | -1.16±1.30 | -1.21±1.57 | -1.61±1.23 | -1.17±1.13 | -1.54±1.23 | -1.26±1.18 |
-|     🟢 |  +0.61 |         ws:pissa |  +1.54 | 0.96 | -0.51±1.02 | +0.09±1.04 | -0.10±1.23 | -0.32±0.75 | -0.34±1.00 | -0.51±0.79 | +0.85±0.78 |
-|     🟢 |  +0.57 |        ws:delora |  +0.96 | 1.00 | -1.17±0.88 | -0.60±0.86 | -0.84±1.06 | -1.17±0.70 | -0.99±0.79 | -1.13±0.81 | -0.09±0.65 |
-|     🟢 |  +0.53 |           sl:pca |  -1.61 | 1.01 | -0.08±0.68 | +0.46±0.74 | +0.18±1.13 | -0.04±0.47 | +0.01±0.55 | -0.19±0.62 | +0.45±0.65 |
-|     🟡 |  +0.35 |   ws:prompt_only |    n/a |  n/a | -0.03±0.44 | +0.33±0.42 | +0.23±0.70 | +0.29±0.56 | +0.04±0.58 | +0.24±0.36 | +0.53±0.51 |
-|     🟡 |  +0.35 |          ws:lora |  +2.15 | 1.04 | -0.20±0.64 | +0.15±0.71 | +0.03±0.65 | -0.26±0.51 | -0.17±0.67 | -0.33±0.50 | +0.60±0.58 |
-|     🟡 |  +0.33 |          ws:dora |  +1.91 | 0.97 | -0.17±0.62 | +0.15±0.71 | +0.06±0.64 | -0.24±0.51 | -0.15±0.64 | -0.32±0.49 | +0.65±0.58 |
-|     🟡 |  +0.33 | sl:engineered_prompt |    n/a |  n/a | +0.31±0.68 | +0.65±0.73 | +0.26±1.10 | +0.61±0.63 | +0.36±0.67 | +0.69±0.76 | +0.52±0.89 |
-|     🟡 |  +0.30 |           ws:oft |  +4.76 | 0.98 | +0.03±0.47 | +0.33±0.51 | +0.18±0.49 | -0.07±0.49 | +0.06±0.48 | -0.01±0.38 | +0.64±0.51 |
-|     🟡 |  +0.29 |   sl:prompt_only |    n/a |  n/a | -0.05±0.64 | +0.24±0.64 | +0.43±1.20 | +0.28±0.51 | +0.31±0.43 | +0.12±0.61 | +0.24±0.70 |
-|     🟡 |  +0.29 | sl:topk_clusters |  -3.35 | 1.00 | -1.37±0.94 | -1.08±0.94 | -1.25±1.14 | -1.13±0.67 | -1.25±0.89 | -1.10±0.71 | -1.14±1.17 |
-|     🔴 |  +0.05 |           ws:ia3 | +28.62 | 0.61 | -0.03±0.57 | +0.02±0.49 | +0.00±0.48 | -0.06±0.45 | -0.10±0.49 | -0.11±0.47 | +0.15±0.49 |
+|  cue |  axis |               method |      C |   kl |     Care ↓ |     Sanc ↑ |       Auth |        Loy |       Fair |        Lib |       SocN |
+| ---: | ----: | -------------------: | -----: | ---: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: |
+|    🟢 | +0.78 |      sl:cosine_gated | +17.60 | 1.01 | -0.51±0.95 | +0.28±0.96 | -0.23±1.40 | -0.37±0.65 | -0.20±0.92 | -0.56±0.71 | +0.49±0.78 |
+|    🟢 | +0.74 |            sl:sspace |  +2.08 | 1.02 | -0.47±0.88 | +0.27±0.89 | -0.14±1.34 | -0.35±0.68 | -0.22±0.92 | -0.51±0.70 | +0.48±0.81 |
+|    🟢 | +0.64 |         sl:mean_diff |  -2.21 | 0.98 | -1.79±1.30 | -1.16±1.30 | -1.21±1.57 | -1.61±1.23 | -1.17±1.13 | -1.54±1.23 | -1.26±1.18 |
+|    🟢 | +0.64 |      sl:mean_centred |  -2.21 | 0.98 | -1.79±1.30 | -1.16±1.30 | -1.21±1.57 | -1.61±1.23 | -1.17±1.13 | -1.54±1.23 | -1.26±1.18 |
+|    🟢 | +0.61 |             ws:pissa |  +1.54 | 0.96 | -0.51±1.02 | +0.09±1.04 | -0.10±1.23 | -0.32±0.75 | -0.34±1.00 | -0.51±0.79 | +0.85±0.78 |
+|    🟢 | +0.57 |            ws:delora |  +0.96 | 1.00 | -1.17±0.88 | -0.60±0.86 | -0.84±1.06 | -1.17±0.70 | -0.99±0.79 | -1.13±0.81 | -0.09±0.65 |
+|    🟢 | +0.53 |               sl:pca |  -1.61 | 1.01 | -0.08±0.68 | +0.46±0.74 | +0.18±1.13 | -0.04±0.47 | +0.01±0.55 | -0.19±0.62 | +0.45±0.65 |
+|    🟡 | +0.35 |       ws:prompt_only |    n/a |  n/a | -0.03±0.44 | +0.33±0.42 | +0.23±0.70 | +0.29±0.56 | +0.04±0.58 | +0.24±0.36 | +0.53±0.51 |
+|    🟡 | +0.35 |              ws:lora |  +2.15 | 1.04 | -0.20±0.64 | +0.15±0.71 | +0.03±0.65 | -0.26±0.51 | -0.17±0.67 | -0.33±0.50 | +0.60±0.58 |
+|    🟡 | +0.33 |              ws:dora |  +1.91 | 0.97 | -0.17±0.62 | +0.15±0.71 | +0.06±0.64 | -0.24±0.51 | -0.15±0.64 | -0.32±0.49 | +0.65±0.58 |
+|    🟡 | +0.33 | sl:engineered_prompt |    n/a |  n/a | +0.31±0.68 | +0.65±0.73 | +0.26±1.10 | +0.61±0.63 | +0.36±0.67 | +0.69±0.76 | +0.52±0.89 |
+|    🟡 | +0.30 |               ws:oft |  +4.76 | 0.98 | +0.03±0.47 | +0.33±0.51 | +0.18±0.49 | -0.07±0.49 | +0.06±0.48 | -0.01±0.38 | +0.64±0.51 |
+|    🟡 | +0.29 |       sl:prompt_only |    n/a |  n/a | -0.05±0.64 | +0.24±0.64 | +0.43±1.20 | +0.28±0.51 | +0.31±0.43 | +0.12±0.61 | +0.24±0.70 |
+|    🟡 | +0.29 |     sl:topk_clusters |  -3.35 | 1.00 | -1.37±0.94 | -1.08±0.94 | -1.25±1.14 | -1.13±0.67 | -1.25±0.89 | -1.10±0.71 | -1.14±1.17 |
+|    🔴 | +0.05 |               ws:ia3 | +28.62 | 0.61 | -0.03±0.57 | +0.02±0.49 | +0.00±0.48 | -0.06±0.45 | -0.10±0.49 | -0.11±0.47 | +0.15±0.49 |
 
 Reproduce: `just eval-tinymfv-trad-care` (per-adapter eval at calibrated α from `out/trad_care/kl_calibration/summary.csv`), then `just summarize-tinymfv` to rebuild this table.
+
+ ws methods cluster around ±0.5-0.7 std while sl methods hit ±0.9-1.3
 
 ### OOD: held-out sycophancy Yes/No claims (12 claims, alpha=+1)
 

@@ -390,16 +390,26 @@ def _bare_logit_per_foundation_table(per_vignette_alpha0: pl.DataFrame) -> pl.Da
     return pl.DataFrame(rows)
 
 
-def _axis_shift(dlogit_table: pl.DataFrame) -> float:
-    """+ve = moved toward Sanctity (traditional/binding), -ve = toward Care.
-    Composite single number = ΔlogitSanctity - ΔlogitCare in nats.
+AXIS_PAIR: dict[str, tuple[str, str]] = {
+    # behavior -> (pos_foundation, neg_foundation); axis = Δlogit_pos - Δlogit_neg
+    "trad_care": ("Sanctity", "Care"),
+    "auth_socn": ("Social Norms", "Authority"),
+}
+
+
+def _axis_shift(dlogit_table: pl.DataFrame, behavior: str = "trad_care") -> float:
+    """Composite axis metric: Δlogit_pos_f - Δlogit_neg_f in nats.
+
+    trad_care: ΔlogitSanctity - ΔlogitCare  (+ve = more traditional)
+    auth_socn: ΔlogitSocNorms - ΔlogitAuthority  (+ve = more anti-authoritarian)
     """
+    pos_f, neg_f = AXIS_PAIR.get(behavior, ("Sanctity", "Care"))
     by_f = {row["foundation_coarse"]: row["dlogit_mean"] for row in dlogit_table.to_dicts()}
-    s = by_f.get("Sanctity", float("nan"))
-    c = by_f.get("Care", float("nan"))
-    if s != s or c != c:  # NaN check
+    p = by_f.get(pos_f, float("nan"))
+    n = by_f.get(neg_f, float("nan"))
+    if p != p or n != n:  # NaN check
         return float("nan")
-    return s - c
+    return p - n
 
 
 def _bootstrap_summary(per_vignette: pl.DataFrame, n_bootstrap: int, seed: int) -> dict[str, float]:
@@ -529,7 +539,7 @@ def run_eval(cfg: TinyMFVAiriskCfg) -> tuple[pl.DataFrame, pl.DataFrame, pl.Data
             steer_per_vig = per_vignette_full.filter(pl.col("alpha") == float(alpha))
             dlogit_tbl = _dlogit_per_foundation_table(base_per_vig, steer_per_vig)
             flips_tbl = _flips_per_foundation_table(base_per_vig, steer_per_vig)
-            axis_shift_by_alpha[float(alpha)] = _axis_shift(dlogit_tbl)
+            axis_shift_by_alpha[float(alpha)] = _axis_shift(dlogit_tbl, cfg.behavior)
             tags = dict(alpha=alpha, adapter=cfg.adapter or "base", behavior=cfg.behavior)
             foundations_dlogit_parts.append(dlogit_tbl.with_columns(
                 **{k: pl.lit(v) for k, v in tags.items()}
