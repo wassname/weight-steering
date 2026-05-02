@@ -57,6 +57,12 @@ eval-airisk:
     uv run python -m ws.eval.airisk --model {{model}} \
         --adapter {{adapter}} --out {{out}}
 
+# AIRisk eval with bisector steering: w ∝ τ̂⁺-τ̂⁻ rescaled to ‖dW‖. Recomputes
+# from adapters (slower); also prints geometry diagnostics on (τ⁺, τ⁻).
+eval-airisk-bisector:
+    uv run python -m ws.eval.airisk --model {{model}} \
+        --behavior {{behavior}} --adapter {{adapter}} --out {{out}} --mode bisector
+
 # tiny-mfv AIRisk logprob eval with bootstrap uncertainty.
 eval-tinymfv-airisk:
     uv run python -m ws.eval.tinymfv_airisk --model {{model}} \
@@ -65,6 +71,14 @@ eval-tinymfv-airisk:
 # Build the combined AIRisk README table once per-adapter runs are done.
 summarize-airisk:
     uv run python -m ws.scripts.readme_airisk_table --behavior {{behavior}} --out {{out}}
+
+# tiny-mfv AIRisk eval at iso-KL calibrated alpha (reads kl_calibration/summary.csv).
+eval-tinymfv-trad-care:
+    uv run python -m ws.scripts.eval_tinymfv_calibrated --behavior trad_care --out {{out}}
+
+# Build the tiny-mfv comparison table (ws + steering-lite rows) for README.
+summarize-tinymfv:
+    uv run python -m ws.scripts.readme_tinymfv_table --behavior trad_care --out {{out}}
 
 # Phase 2: project w onto SVD + AntiPaSTO subspaces, print alignment table.
 subspace-align:

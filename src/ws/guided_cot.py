@@ -27,11 +27,18 @@ Qwen3 thinking-mode gotchas:
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from contextlib import contextmanager
 
 import torch
 from torch import Tensor
+from transformers import StaticCache
+
+# transformers 5.x wraps model_forward with torch.compile when StaticCache is
+# detected. We use StaticCache only as an OOM canary (early allocation), not as
+# a compilation target. Disable dynamo here so generate() stays in eager mode.
+os.environ.setdefault("TORCHDYNAMO_DISABLE", "1")
 
 from ws.steer import weight_steer
 
@@ -91,11 +98,16 @@ def guided_cot_one(
 
     with weight_steer(model, w, alpha):
         with _greedy_generation(model):
+            # Static KV cache: pre-allocates max_cache_len at first generate call.
+            # OOMs at startup instead of mid-sequence; canary for big models.
+            # max_cache_len is exact (known prefix + n_think).
+            cache = StaticCache(model.config, max_cache_len=int(prefix_ids.shape[1]) + n_think)
             gen = model.generate(
                 prefix_ids,
                 max_new_tokens=n_think,
                 do_sample=False,
                 pad_token_id=tok.pad_token_id or tok.eos_token_id,
+                past_key_values=cache,
             )
         gen_new = gen[0, prefix_ids.shape[1]:]
         already_closed = (gen_new == think_close_id).any().item()
@@ -181,6 +193,9 @@ def guided_rollout_batch(
     with weight_steer(model, w, alpha):
         # Phase 1: batched greedy think under steering.
         with _greedy_generation(model):
+            # Static KV cache: exact max_cache_len = L_pad + n_think so OOM trips
+            # at first generate, not mid-sequence. Cheap canary for big models.
+            cache = StaticCache(model.config, max_cache_len=int(L_pad) + n_think)
             gen = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -188,6 +203,7 @@ def guided_rollout_batch(
                 do_sample=False,
                 eos_token_id=think_close_id,
                 pad_token_id=pad_id,
+                past_key_values=cache,
             )
         gen_new = gen[:, L_pad:]  # [B, g], right-padded with pad_id post-eos
 

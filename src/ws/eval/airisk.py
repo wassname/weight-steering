@@ -37,9 +37,11 @@ from torch import Tensor
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorWithPadding
 
+from ws._artifacts import model_slug, timestamp_prefix
 from ws._tok_extras import chat_template_extras
 from ws._log import final_summary, get_argv, setup_logging
 from ws.guided_cot import guided_rollout_batch
+from ws.prompt_texts import PROMPTS
 from ws.steer import weight_steer
 
 # Guided-CoT prompt: model thinks inside <think>...</think>, then answers at
@@ -387,27 +389,86 @@ class _AIRiskCli:
     n_dilemmas: int = 0
     batch_size: int = 8
     n_think: int = 128
+    prompt_baseline: bool = False
+    prompt_pos: str = "engineered_prompt_honest"
+    prompt_neg: str = "engineered_prompt_dishonest"
+    mode: str = "dw"  # 'dw' = paper's τ⁺-τ⁻ (loads w.pt). 'bisector' recomputes from adapters.
+
+
+def _prompt_baseline_system_prompt(cli: _AIRiskCli, coeff: float) -> str:
+    if coeff > 0:
+        return PROMPTS[cli.prompt_pos]
+    if coeff < 0:
+        return PROMPTS[cli.prompt_neg]
+    return ""
+
+
+def _evaluate_prompt_baseline(cli: _AIRiskCli) -> pl.DataFrame:
+    tok = AutoTokenizer.from_pretrained(cli.model)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    tok.padding_side = "left"
+    model = AutoModelForCausalLM.from_pretrained(cli.model, dtype=torch.bfloat16, device_map="cuda")
+    model.eval()
+
+    parts = []
+    for coeff in cli.coeffs:
+        cfg = AIRiskCfg(
+            model_id=cli.model,
+            coeffs=(float(coeff),),
+            value_class=cli.value_class,
+            n_dilemmas=cli.n_dilemmas,
+            batch_size=cli.batch_size,
+            system_prompt=_prompt_baseline_system_prompt(cli, float(coeff)),
+            n_think=cli.n_think,
+        )
+        part = evaluate(cfg, {}, model=model, tok=tok)
+        parts.append(part.with_columns(pl.lit("prompt_baseline").alias("persona")))
+    return pl.concat(parts)
 
 
 def main():
     """CLI: load w.pt for {behavior}/{adapter}, run AIRisk sweep, save csv."""
     import tyro
-    from ws.diff import load_diff
+    from ws.diff import compute_diff, diagnostics, load_base_state, load_delta, load_diff
 
     cli = tyro.cli(_AIRiskCli)
     setup_logging("airisk")
     out_dir = cli.out / cli.behavior / cli.adapter
-    w = load_diff(out_dir / "w.pt")
-    cfg = AIRiskCfg(
-        model_id=cli.model, coeffs=cli.coeffs,
-        value_class=cli.value_class,
-        n_dilemmas=cli.n_dilemmas, batch_size=cli.batch_size,
-        n_think=cli.n_think,
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if cli.prompt_baseline:
+        df = _evaluate_prompt_baseline(cli)
+    else:
+        if cli.mode == "dw":
+            w = load_diff(out_dir / "w.pt")
+        else:
+            base = load_base_state(cli.model)
+            d_pos = load_delta(cli.model, out_dir / "pos", base)
+            d_neg = load_delta(cli.model, out_dir / "neg", base)
+            del base
+            torch.cuda.empty_cache()
+            diagnostics(d_pos, d_neg)
+            w = compute_diff(d_pos, d_neg, mode=cli.mode)
+            del d_pos, d_neg
+            torch.cuda.empty_cache()
+        cfg = AIRiskCfg(
+            model_id=cli.model, coeffs=cli.coeffs,
+            value_class=cli.value_class,
+            n_dilemmas=cli.n_dilemmas, batch_size=cli.batch_size,
+            n_think=cli.n_think,
+        )
+        df = evaluate(cfg, w)
+    run_tag = timestamp_prefix()
+    scope_tag = f"smoke_n{cli.n_dilemmas}" if cli.n_dilemmas > 0 else "full_nall"
+    mode_tag = f"__mode{cli.mode}" if cli.mode != "dw" else ""
+    stem = (
+        f"{run_tag}__eval_airisk_{cli.value_class.lower()}__{scope_tag}"
+        f"__{model_slug(cli.model)}__think{cli.n_think}{mode_tag}"
     )
-    df = evaluate(cfg, w)
-    df.write_csv(out_dir / f"airisk_{cli.value_class.lower()}_per_row.csv")
+    per_row_path = out_dir / f"{stem}__per_row.csv"
+    df.write_csv(per_row_path)
     summary = summarize(df)
-    summary_path = out_dir / f"airisk_{cli.value_class.lower()}_summary.csv"
+    summary_path = out_dir / f"{stem}__summary.csv"
     summary.write_csv(summary_path)
     metrics = compute_metrics(df)
     print(f"\nairisk eval summary (value_class={cli.value_class!r})")

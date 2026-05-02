@@ -1,7 +1,7 @@
 """Token-efficient loguru setup + BLUF helper.
 
 Call ``setup_logging("replicate")`` once at the top of an entrypoint's main().
-Stdout sink: plain, no-color, tqdm-safe, ``{message}`` only.
+Stdout sink: plain, no-color, ``{message}`` only.
 File sink: ``logs/<name>.verbose.log`` at DEBUG with timestamp/location.
 
 Use ``final_summary(...)`` at the very end of main() to emit the standard
@@ -19,7 +19,6 @@ from typing import Any, Sequence
 
 from loguru import logger
 from tabulate import tabulate
-from tqdm.auto import tqdm
 
 _CONFIGURED: set[str] = set()
 
@@ -57,13 +56,8 @@ def setup_logging(name: str, log_dir: str | Path = "logs") -> Path:
 
     logger.remove()
     level = os.environ.get("LOG_LEVEL", "INFO")
-    # Stdout: plain, no colors, tqdm-safe
-    logger.add(
-        lambda msg: tqdm.write(msg, end=""),
-        level=level,
-        colorize=False,
-        format="{message}",
-    )
+    # Stdout: plain, no colors
+    logger.add(sys.stdout, level=level, colorize=False, format="{message}")
     # File: full traces for on-demand debugging
     logger.add(
         str(log_path),

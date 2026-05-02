@@ -849,3 +849,85 @@ conclusion stronger than "Q2 ceiling is 11%, we don't know why".
 - New artifact dir: `out/sycophancy/activation_basis_ablation/`
 - Prior 11% result: this journal line 444 (`preserved_E = 0.109`)
 - Prior lens-search-on-hold rationale: this journal line 541
+
+# 2026-05-02 — geometry of (τ⁺, τ⁻): does paper's dW need decontamination?
+
+## Question
+
+The paper computes `w = τ⁺ - τ⁻` where `τ = θ_finetuned - θ_pre`. Decompose
+each adapter into a behavior axis `b` and adapter-specific drift `c`:
+
+$$\tau^+ = b + c^+, \quad \tau^- = -b + c^-$$
+
+Then `dW = τ⁺ - τ⁻ = 2b + (c⁺ - c⁻)`. The drift only cancels if
+`c⁺ ≈ c⁻`. Two concerns:
+
+1. The chord between `θ_pos` and `θ_neg` does not pass through `θ_pre`
+   (asymmetric drift); is dW's *direction* still monotonic through `θ_pre`?
+2. Is dW contaminated by common-mode drift `M = (τ⁺+τ⁻)/2`?
+
+If yes to either, an angle-bisector variant `w ∝ τ̂⁺ - τ̂⁻` (length-normalize
+each side, rescale to ‖dW‖) might recover signal.
+
+## How measured
+
+Added `diagnostics(τ⁺, τ⁻)` in `src/ws/diff.py`. Three scalar inner products
+(`p² = ‖τ⁺‖²`, `n² = ‖τ⁻‖²`, `pn = ⟨τ⁺,τ⁻⟩`) give everything:
+
+- `cos(τ⁺, -τ⁻) = -pn / (‖τ⁺‖·‖τ⁻‖)` — antipodality of the two adapters
+- `‖τ⁺‖/‖τ⁻‖` — adapter-magnitude asymmetry
+- `‖M‖/‖b‖ = √(p² + 2pn + n²) / √(p² - 2pn + n²)` — common-mode vs differential
+- `|cos(dW, M)| = |p² - n²| / (‖dW‖·‖M‖·2)` — fraction of dW pointing along drift
+
+Loaded `out/honesty/lora/{pos,neg}` adapters, merged into delta-W via
+`load_delta`, computed the four numbers (no eval needed — purely geometric).
+
+## Observations (Qwen3-0.6B, honesty, LoRA r32)
+
+| metric | value | interpretation |
+|---|---|---|
+| `cos(τ⁺, -τ⁻)` | -0.644 | NOT antipodal; adapters point *similar* directions |
+| `‖τ⁺‖/‖τ⁻‖` | 0.967 | nearly equal magnitudes |
+| `‖M‖/‖b‖` | 2.148 | common drift dominates each individual τ ~2x |
+| `|cos(dW, M)|` | 0.044 | dW already nearly perpendicular to drift |
+
+## Conclusion
+
+Paper's dW is near-optimal for this data. The first three numbers look
+alarming — the two adapters are *not* antipodes, common drift is 2x larger
+than the behavior axis in each individual `τ` — but `dW = τ⁺ - τ⁻`
+algebraically subtracts the common-mode component, and the residual happens
+to be 96% perpendicular to `M`. Drop-midpoint would be a no-op.
+
+Asymmetry being 0.967 means bisector ≈ dW within ~3%. Queued bisector eval
+(pueue task 64) as null-result confirmation rather than expected-improvement.
+
+This generalizes: the paper's contrastive-pair recipe produces near-balanced
+adapter magnitudes by construction (same data, same hparams, opposite sign),
+which is the regime where dW ≈ bisector. The pathology bisector would fix
+(one adapter much louder than the other) likely doesn't arise here.
+
+## File pointers
+
+- New: `diagnostics()` and `mode='bisector'` in `src/ws/diff.py:67-154`
+- New: `--mode dw|bisector` CLI flag in `src/ws/eval/airisk.py`
+- New: `eval-airisk-bisector` recipe in `justfile:62-64`
+- Geometry diagram: `docs/weight_steering_geometry.svg`
+- Adapters measured: `out/honesty/lora/{pos,neg}/`
+- Pending: pueue task 64 (bisector eval, awaiting null-result confirmation)
+
+## Addendum: the "through 0" concern was a confusion
+
+The concern that motivated this excursion ("does paper's dW pass through θ_pre?")
+was based on conflating two objects:
+
+- The **chord** between θ_pos and θ_neg in weight space: a line *segment* offset
+  from θ_pre by M = (τ⁺+τ⁻)/2. Does NOT pass through θ_pre in general.
+- The **steering direction** dW = τ⁺ − τ⁻: a *direction*, applied as
+  `θ_pre + α·dW`. Trajectory passes through θ_pre by construction (at α=0).
+
+The paper steers along the second, not the first. So the trajectory is already
+"through 0" at α=0 — there was nothing to fix. Bisector is kept as `--mode
+bisector` (an option, not the default) because it's a useful regression check
+if the data pipeline becomes magnitude-asymmetric, but it does not solve a
+geometric problem in the symmetric case. Default reverted to dW.

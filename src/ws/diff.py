@@ -65,25 +65,93 @@ def load_delta(
 
 
 def compute_diff(
-    delta_pos: dict[str, Tensor], delta_neg: dict[str, Tensor]
+    delta_pos: dict[str, Tensor],
+    delta_neg: dict[str, Tensor],
+    mode: str = "dw",
 ) -> dict[str, Float[Tensor, "..."]]:
-    """w = delta_pos - delta_neg, only over keys present in both."""
+    """Behavior direction in delta-W space.
+
+    mode='dw'        : w = τ⁺ − τ⁻  (paper's contrastive task vector)
+    mode='bisector'  : w ∝ τ̂⁺ − τ̂⁻, length-normalize each side then subtract,
+                       rescale to ‖dW‖. Treats each adapter as a direction so a
+                       louder fine-tune doesn't dominate. Coefficient sweeps stay
+                       comparable across modes because of the rescale.
+    """
     keys = set(delta_pos) & set(delta_neg)
     if not keys:
         logger.warning("compute_diff: no overlapping keys -- both deltas may be zero "
                        "(e.g. IA3 with too few training steps). Returning empty diff.")
         return {}
-    w = {k: delta_pos[k] - delta_neg[k] for k in keys}
+
+    pos_norm_sq = sum(float((delta_pos[k].float() ** 2).sum()) for k in keys)
+    neg_norm_sq = sum(float((delta_neg[k].float() ** 2).sum()) for k in keys)
+    pos_norm, neg_norm = pos_norm_sq ** 0.5, neg_norm_sq ** 0.5
+
+    if mode == "dw":
+        w = {k: delta_pos[k] - delta_neg[k] for k in keys}
+    elif mode == "bisector":
+        pn = sum(float((delta_pos[k].float() * delta_neg[k].float()).sum()) for k in keys)
+        dW_norm = (pos_norm_sq - 2 * pn + neg_norm_sq) ** 0.5
+        raw = {k: delta_pos[k].float() / pos_norm - delta_neg[k].float() / neg_norm
+               for k in keys}
+        raw_norm = sum(float((v ** 2).sum()) for v in raw.values()) ** 0.5
+        scale = dW_norm / raw_norm if raw_norm > 0 else 1.0
+        w = {k: (v * scale).to(delta_pos[k].dtype) for k, v in raw.items()}
+    else:
+        raise ValueError(f"unknown mode: {mode!r} (expected 'dw' or 'bisector')")
+
     norm = float(sum((v.float() ** 2).sum() for v in w.values()) ** 0.5)
-    pos_norm = float(sum((v.float() ** 2).sum() for v in delta_pos.values()) ** 0.5)
-    neg_norm = float(sum((v.float() ** 2).sum() for v in delta_neg.values()) ** 0.5)
     logger.info(
-        f"diff w: {len(w)} keys, {sum(v.numel() for v in w.values()):,} params, "
+        f"diff w (mode={mode}): {len(w)} keys, {sum(v.numel() for v in w.values()):,} params, "
         f"||w||={norm:.4g}, ||θ+||={pos_norm:.4g}, ||θ-||={neg_norm:.4g}"
     )
     if norm == 0:
         logger.warning("||w|| == 0: pos and neg adapters are identical; steering will be a no-op")
     return w
+
+
+def diagnostics(
+    delta_pos: dict[str, Tensor], delta_neg: dict[str, Tensor]
+) -> dict[str, float]:
+    """Geometric diagnostics on (τ⁺, τ⁻) before forming a steering vector.
+
+    cos_anti     = cos(τ⁺, −τ⁻). →1 means τ⁺ and τ⁻ are antipodal (clean contrast).
+    asymmetry    = ‖τ⁺‖/‖τ⁻‖. ≠1 means one fine-tune is louder than the other.
+    drift_ratio  = ‖M‖/‖b‖ with M=(τ⁺+τ⁻)/2 (common drift), b=(τ⁺−τ⁻)/2 (behavior).
+                   ≫1 means common-mode dominates differential; bisector might help.
+    cos_dW_M     = |cos(dW, M)|. Fraction of paper's dW that points along common drift.
+                   ≪1 means dW already sits in M⊥ (drop-midpoint would be a no-op).
+    """
+    keys = set(delta_pos) & set(delta_neg)
+    p2 = sum(float((delta_pos[k].float() ** 2).sum()) for k in keys)
+    n2 = sum(float((delta_neg[k].float() ** 2).sum()) for k in keys)
+    pn = sum(float((delta_pos[k].float() * delta_neg[k].float()).sum()) for k in keys)
+
+    p_norm, n_norm = p2 ** 0.5, n2 ** 0.5
+    cos_anti = -pn / (p_norm * n_norm) if p_norm * n_norm > 0 else 0.0
+    dW_norm = (p2 - 2 * pn + n2) ** 0.5
+    M_norm = ((p2 + 2 * pn + n2) / 4) ** 0.5
+    b_norm = dW_norm / 2
+    drift_ratio = M_norm / b_norm if b_norm > 0 else 0.0
+    cos_dW_M = abs((p2 - n2) / 2) / (dW_norm * M_norm) if dW_norm * M_norm > 0 else 0.0
+
+    d = {
+        "norm_pos": p_norm, "norm_neg": n_norm,
+        "asymmetry": p_norm / n_norm if n_norm > 0 else float("inf"),
+        "cos_anti": cos_anti,
+        "norm_dW": dW_norm, "norm_M": M_norm,
+        "drift_ratio": drift_ratio,
+        "cos_dW_M": cos_dW_M,
+    }
+    logger.info(
+        "geometry: cos(τ⁺,-τ⁻)={cos_anti:+.3f}  ‖τ⁺‖/‖τ⁻‖={asymmetry:.3f}  "
+        "‖M‖/‖b‖={drift_ratio:.3f}  |cos(dW,M)|={cos_dW_M:.3f}".format(**d)
+    )
+    logger.info(
+        "SHOULD: cos_anti→+1 (antipodal). drift_ratio≪1 (clean). "
+        "|cos(dW,M)|≪1 means paper's dW already orthogonal to drift."
+    )
+    return d
 
 
 def save_diff(w: dict[str, Tensor], path: Path) -> None:
