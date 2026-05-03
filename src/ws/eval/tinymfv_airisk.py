@@ -62,7 +62,7 @@ FRAMES: dict[str, dict[str, str | float]] = {
 
 @dataclass
 class TinyMFVAiriskCfg:
-    model: str = "Qwen/Qwen3.5-4B"
+    model: str = "Qwen/Qwen3-4B"
     behavior: str = "authority"
     adapter: str = "delora"
     out: Path = Path("out")
