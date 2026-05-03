@@ -27,7 +27,7 @@ import tyro
 from datasets import Dataset
 from loguru import logger
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, StaticCache
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from ws._log import get_argv, setup_logging
 from ws._tok_extras import chat_template_extras, has_thinking_mode
@@ -423,9 +423,6 @@ def _generate_batch(
         for start in tqdm(range(0, len(prompts), cfg.batch_size), desc=f"gen {trace_label}", mininterval=60):
             batch_prompts = prompts[start:start + cfg.batch_size]
             enc = tok(batch_prompts, return_tensors="pt", padding=True).to(model.device)
-            # Static KV cache: exact L_pad + max_new_tokens so OOM trips at first
-            # generate call, not mid-batch. Cheap canary for big models.
-            cache = StaticCache(model.config, max_cache_len=int(enc["input_ids"].shape[1]) + cfg.max_new_tokens)
             out = model.generate(
                 **enc,
                 min_new_tokens=cfg.min_new_tokens,
@@ -437,7 +434,6 @@ def _generate_batch(
                 min_p=sampling["min_p"],
                 pad_token_id=tok.pad_token_id or tok.eos_token_id,
                 eos_token_id=tok.eos_token_id,
-                past_key_values=cache,
             )
             gen_block = out[:, enc["input_ids"].shape[1]:].cpu()
             for i, prompt_text in enumerate(batch_prompts):
