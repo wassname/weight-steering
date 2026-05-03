@@ -27,7 +27,7 @@ import tyro
 from datasets import Dataset
 from loguru import logger
 from tqdm.auto import tqdm
-from transformers import AutoModelForCausalLM, AutoTokenizer, StaticCache
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, StaticCache
 
 from ws._log import get_argv, setup_logging
 from ws._tok_extras import chat_template_extras, has_thinking_mode
@@ -258,6 +258,7 @@ class DataCfg:
     n_personas: int = 5
     n_samples: int = 10
     out: Path = Path("out/data")
+    use_4bit: bool = True
     batch_size: int = 8
     min_new_tokens: int = 1024
     max_new_tokens: int = 1280
@@ -543,8 +544,10 @@ def generate_pairs(cfg: DataCfg) -> Path:
     tok = AutoTokenizer.from_pretrained(cfg.model_id)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+    bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16) if cfg.use_4bit else None
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda"
+        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda",
+        quantization_config=bnb_cfg,
     )
     model.eval()
 
@@ -613,15 +616,17 @@ def generate_pairs(cfg: DataCfg) -> Path:
 
     ds = Dataset.from_list(rows)
     assert_generated_pairs_diverged(ds)
-    out_dir = cfg.out / cfg.behavior
+    model_slug = cfg.model_id.replace("/", "_")
+    out_dir = cfg.out / model_slug / cfg.behavior
     out_dir.mkdir(parents=True, exist_ok=True)
     ds.save_to_disk(str(out_dir))
     logger.info(f"saved {len(ds)} pairs to {out_dir}")
     return out_dir
 
 
-def load_pairs(behavior: str, root: Path = Path("out/data")) -> Dataset:
-    ds = Dataset.load_from_disk(str(root / behavior))
+def load_pairs(behavior: str, model_id: str, root: Path = Path("out/data")) -> Dataset:
+    model_slug = model_id.replace("/", "_")
+    ds = Dataset.load_from_disk(str(root / model_slug / behavior))
     assert_generated_pairs_diverged(ds)
     return ds
 

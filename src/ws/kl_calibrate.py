@@ -42,7 +42,7 @@ import tyro
 from loguru import logger
 from tabulate import tabulate
 from torch import Tensor
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from ws._log import final_summary, get_argv, setup_logging
 from ws.data import _load_suffixes
@@ -66,7 +66,7 @@ class KLCalibrateCfg:
     model: str = "Qwen/Qwen3-0.6B"
     behavior: str = "honesty"
     out: Path = Path("out")
-    adapters: tuple[str, ...] = ("delora",)
+    adapters: tuple[str, ...] = ("lora", "pissa", "dora", "delora", "oft", "ia3")
     n_calib_prompts: int = 50
     n_audit_prompts: int = 100
     n_tokens: int = 50
@@ -80,6 +80,7 @@ class KLCalibrateCfg:
     bracket_hi: float = 16.0
     n_root_iters: int = 12  # Illinois inner loop; usually converges in 3-5
     convergence_tol: float = 0.05  # |p95 - target| < tol (absolute, in nats)
+    use_4bit: bool = True
     seed: int = 0
 
 
@@ -322,8 +323,10 @@ def main(cfg: KLCalibrateCfg) -> None:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
+    bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16) if cfg.use_4bit else None
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, torch_dtype=torch.bfloat16, device_map="cuda"
+        cfg.model, torch_dtype=torch.bfloat16, device_map="cuda",
+        quantization_config=bnb_cfg,
     )
     model.eval()
 

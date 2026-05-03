@@ -20,7 +20,7 @@ import tyro
 from datasets import load_dataset
 from loguru import logger
 from tabulate import tabulate
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 from ws._artifacts import model_slug, timestamp_prefix
 from ws._log import final_summary, get_argv, setup_logging
@@ -70,6 +70,7 @@ class TinyMFVAiriskCfg:
     batch_size: int = 16
     max_length: int = 256
     limit: int = 0
+    use_4bit: bool = True
     bootstrap_samples: int = 1000
     bootstrap_seed: int = 0
 
@@ -520,7 +521,8 @@ def run_eval(cfg: TinyMFVAiriskCfg) -> tuple[pl.DataFrame, pl.DataFrame, pl.Data
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
-    model = AutoModelForCausalLM.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, device_map="cuda")
+    bnb_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_compute_dtype=torch.bfloat16) if cfg.use_4bit else None
+    model = AutoModelForCausalLM.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, device_map="cuda", quantization_config=bnb_cfg)
     model.eval()
 
     vignettes = _load_vignettes(cfg.limit)
