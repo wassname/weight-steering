@@ -156,7 +156,7 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
         tok.pad_token = tok.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda"
+        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="flash_attention_2"
     )
     model.config.use_cache = False
 

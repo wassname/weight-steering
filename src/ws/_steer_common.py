@@ -1,17 +1,12 @@
-"""Shared steering primitives used by both KL calibration and dilemma eval.
-
-Why share this module: prompt formatting, special-token boundaries, and
-steering-context wiring are exactly the surface where bugs hide. If calib and
-eval don't share this code, you can fix calib without fixing eval (or vice
-versa) and never notice. Everything here is what both scripts call.
+"""Shared steering primitives used by KL calibration.
 
 Provides:
   - chat-template builders (text + ids)
-  - unified steering_context: dW / repe / prompt / base under one with-block
-  - greedy_generate_under_steering: greedy-roll n_new_tokens with steering on
+  - steering_context: dW / base under one with-block
+  - greedy_generate_under_steering: greedy-roll n_new_tokens with dW steering
   - teacher_force_logp: forward fixed ids, return log-probs at last n positions
   - log_sample_prompt: dumps the full chat-templated string with special tokens
-    visible (\n's, <|im_start|>, etc.) so prompt-formatting bugs surface in logs
+    visible so prompt-formatting bugs surface in logs
 """
 
 from __future__ import annotations
@@ -19,12 +14,10 @@ from __future__ import annotations
 from contextlib import contextmanager
 
 import torch
-from baukit import TraceDict
 from loguru import logger
 from torch import Tensor
 
 from ws._tok_extras import chat_template_extras  # noqa: F401 (re-export)
-from ws.repe import edit_all_tokens_per_layer
 from ws.steer import weight_steer
 
 
@@ -71,22 +64,12 @@ def build_chat_ids(tok, system: str, user: str, assistant_prefix: str,
 
 
 @contextmanager
-def steering_context(method: str, alpha: float, *, model,
-                     w=None, repe_dirs=None, repe_layers=None):
-    """Unified steering for dW: / repe / prompt: / base.
-
-    `prompt:` and `base` are nullcontext — their "steering" is the system
-    prompt baked into input_ids upstream, not a runtime hook.
-    """
+def steering_context(method: str, alpha: float, *, model, w=None):
+    """Steering context for dW: methods (or base for unsteered pass)."""
     if method.startswith("dW:"):
         with weight_steer(model, w, alpha):
             yield
-    elif method == "repe":
-        hooks = [f"model.layers.{L}" for L in repe_layers]
-        edit = edit_all_tokens_per_layer(repe_dirs, list(repe_layers), alpha)
-        with TraceDict(model, hooks, edit_output=edit):
-            yield
-    elif method.startswith("prompt:") or method == "base":
+    elif method == "base":
         yield
     else:
         raise ValueError(f"unknown method: {method}")
@@ -95,16 +78,10 @@ def steering_context(method: str, alpha: float, *, model,
 @torch.no_grad()
 def greedy_generate_under_steering(
     model, tok, input_ids: Tensor, *, method: str, alpha: float,
-    n_new_tokens: int, w=None, repe_dirs=None, repe_layers=None,
+    n_new_tokens: int, w=None,
 ) -> tuple[Tensor, Tensor]:
-    """Greedy-generate n_new_tokens under steering. Returns (gen_ids[T], logp_steered[T,V]).
-
-    `output_scores=True` with `do_sample=False` returns the raw next-token
-    logits at each generation step — these are the steered model's actual
-    distribution at each rolled position.
-    """
-    with steering_context(method, alpha, model=model, w=w,
-                          repe_dirs=repe_dirs, repe_layers=repe_layers):
+    """Greedy-generate n_new_tokens under dW steering. Returns (gen_ids[T], logp_steered[T,V])."""
+    with steering_context(method, alpha, model=model, w=w):
         out = model.generate(
             input_ids.unsqueeze(0).to(model.device),
             max_new_tokens=n_new_tokens, do_sample=False, temperature=1.0,

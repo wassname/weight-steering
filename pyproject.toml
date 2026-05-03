@@ -18,6 +18,7 @@ dependencies = [
     "wandb>=0.18",
     "tyro>=0.8",
     "baukit @ git+https://github.com/davidbau/baukit.git",
+    "tiny-mfv @ git+https://github.com/wassname/tinymfv",
 ]
 
 [project.optional-dependencies]

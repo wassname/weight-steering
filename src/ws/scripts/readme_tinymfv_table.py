@@ -75,6 +75,17 @@ BEHAVIOR_AXIS: dict[str, dict] = {
         ),
         "arrow_pos": "Social Norms", "arrow_neg": "Authority",
     },
+    "authority": {
+        "title": "ws Authority↓ (MFT framing) — directly comparable to steering-lite",
+        "blurb": (
+            "Task: shift the model away from authority-deference on the single Authority "
+            "foundation (MFT-paper framing). Headline metric `axis = −ΔlogitAuthority` (nats); "
+            "Δ values are paired by (vignette, condition) so vignette difficulty cancels. "
+            "Setup: target_kl=1.0 nat (iso-KL across methods), max_think=64, vignettes=airisk. "
+            "Persona prompts only (no engineered prompt)."
+        ),
+        "arrow_pos": None, "arrow_neg": "Authority",
+    },
 }
 
 
@@ -82,8 +93,10 @@ def _foundation_short(behavior: str) -> dict[str, str]:
     """Annotate FOUNDATION_BARE labels with ↑/↓ arrows for the active axis."""
     axis = BEHAVIOR_AXIS[behavior]
     out = dict(FOUNDATION_BARE)
-    out[axis["arrow_pos"]] = f"{FOUNDATION_BARE[axis['arrow_pos']]} ↑"
-    out[axis["arrow_neg"]] = f"{FOUNDATION_BARE[axis['arrow_neg']]} ↓"
+    if axis["arrow_pos"] is not None:
+        out[axis["arrow_pos"]] = f"{FOUNDATION_BARE[axis['arrow_pos']]} ↑"
+    if axis["arrow_neg"] is not None:
+        out[axis["arrow_neg"]] = f"{FOUNDATION_BARE[axis['arrow_neg']]} ↓"
     return out
 
 
@@ -237,13 +250,17 @@ def _ws_delta_row(cfg: ReadmeTinymfvCfg, adapter: str, calib: dict[str, dict]) -
     by_f = {r["foundation_coarse"]: r for r in sub_d.to_dicts()}
     cal = calib.get(adapter, {})
     p95_key = "p95_at_pos" if cfg.target_alpha_sign > 0 else "p95_at_neg"
-    return {
+    row_dict = {
         "method": f"ws:{adapter}",
         "axis": float(sub["axis_shift"][0]),
         "C": float(alpha),
         "kl": float(cal.get(p95_key, float("nan"))) if cal else float("nan"),
         "by_f": by_f,
     }
+    # Read SI if available (authority behavior)
+    if "SI_Authority" in sub.columns:
+        row_dict["si_authority"] = float(sub["SI_Authority"][0])
+    return row_dict
 
 
 def _ws_prompt_row(cfg: ReadmeTinymfvCfg) -> dict | None:
@@ -266,13 +283,16 @@ def _ws_prompt_row(cfg: ReadmeTinymfvCfg) -> dict | None:
     sub_d = dlogit.filter(pl.col("alpha") == alpha)
     if sub.is_empty() or sub_d.is_empty():
         return None
-    return {
+    row_dict = {
         "method": "ws:prompt_only",
         "axis": float(sub["axis_shift"][0]),
         "C": float("nan"),
         "kl": float("nan"),
         "by_f": {r["foundation_coarse"]: r for r in sub_d.to_dicts()},
     }
+    if "SI_Authority" in sub.columns:
+        row_dict["si_authority"] = float(sub["SI_Authority"][0])
+    return row_dict
 
 
 def _sl_delta_row(cfg: ReadmeTinymfvCfg, method: str) -> dict | None:
@@ -322,6 +342,10 @@ def _print_delta_table(rows: list[dict], behavior: str) -> None:
           "Cells: `mean±std`. Cue: 🟢 |axis|>0.5  🟡 >0.15  🔴 below noise.\n")
     short = _foundation_short(behavior)
     headers = ["cue", "axis", "method", "C", "kl"] + [short[f] for f in FOUNDATION_ORDER]
+    # Add SI column for authority behavior (single-foundation SI metric)
+    has_si = behavior == "authority"
+    if has_si:
+        headers.append("SI_Auth")
     rows_sorted = sorted(rows, key=lambda r: -abs(r["axis"]) if r["axis"] == r["axis"] else 0)
     out_rows = []
     for r in rows_sorted:
@@ -331,6 +355,9 @@ def _print_delta_table(rows: list[dict], behavior: str) -> None:
             mean = d.get("dlogit_mean", float("nan")) if isinstance(d, dict) else float("nan")
             std = d.get("dlogit_std", float("nan")) if isinstance(d, dict) else float("nan")
             line.append(_fmt_pm(mean, std))
+        if has_si:
+            si_val = r.get("si_authority", float("nan"))
+            line.append(f"{si_val:+.2f}" if si_val == si_val else "—")
         out_rows.append(line)
     if not out_rows:
         print("(no Δ-rows -- run the calibrated tinymfv eval first)")

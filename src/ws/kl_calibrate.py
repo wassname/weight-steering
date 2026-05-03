@@ -54,8 +54,6 @@ from ws._steer_common import (
     log_sample_prompt,
     teacher_force_logp,
 )
-from ws.prompt_texts import PROMPTS as PROMPT_TEXTS
-from ws.repe import fit_repe_directions
 
 CALIB_CATS = (
     "code", "dialogue", "encyclopedia", "reasoning",
@@ -69,25 +67,19 @@ class KLCalibrateCfg:
     behavior: str = "honesty"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "pissa", "dora", "delora", "oft", "ia3")
-    include_repe: bool = True
     n_calib_prompts: int = 50
     n_audit_prompts: int = 100
     n_tokens: int = 50
     target_pct: float = 95.0
     # "Side of the road" = 1 nat per-token KL (gist):
     # https://gist.github.com/wassname/6c11cf30b43d8c228bc114795f1019c7
-    # Newton residual is 1 − p95(KL); we search a global coefficient C such
-    # that p95 KL = target_kl at α=1.
     target_kl: float = 0.5
-    target_prompt: str = "engineered_prompt_honest"  # logged as a reference, not the target
     # Bracket guard (lo, hi) on the global coefficient. KL ~ α²·F near root, so
     # below ~0.05 nothing happens; above ~16 we'd be deep in collapse-land.
     bracket_lo: float = 0.05
     bracket_hi: float = 16.0
     n_root_iters: int = 12  # Illinois inner loop; usually converges in 3-5
     convergence_tol: float = 0.05  # |p95 - target| < tol (absolute, in nats)
-    repe_layers: tuple[int, ...] = field(default_factory=lambda: tuple(range(8, 22)))
-    n_repe_train: int = 50
     seed: int = 0
 
 
@@ -129,60 +121,33 @@ def _select_prompts(n_calib: int, n_audit: int, seed: int) -> tuple[list[dict], 
     return calib, audit
 
 
-def _system_prompts_for(method: str) -> tuple[str, str]:
-    """Return (sys_for_steered_pass, sys_for_base_pass).
-
-    For prompt: methods, the "steering" is the system prompt; base has none.
-    For dW / repe / base, both passes use the same (empty) system prompt and
-    steering is applied at runtime.
-    """
-    if method.startswith("prompt:"):
-        return PROMPT_TEXTS[method.split(":", 1)[1]], ""
-    return "", ""
-
-
 @torch.no_grad()
 def _measure_kl_along_trajectory(
     method: str, alpha: float, *, model, tok, prompts, n_tokens,
-    w=None, repe_dirs=None, repe_layers=None,
-    log_first_sample: bool = False, sample_label: str = "",
+    w=None, log_first_sample: bool = False, sample_label: str = "",
 ) -> dict:
     """KL(steered ‖ base) per token along the steered greedy trajectory.
 
     For each prompt:
-      1. Build steered_ids (with sys prompt if method=prompt:).
-      2. Greedy-generate n_tokens under steering -> (gen_ids, logp_steered[T,V]).
-      3. Build base_ids (no sys prompt) + gen_ids; teacher-force base -> logp_base[T,V].
-      4. KL_t = Σ_v p_steered_t(v) · (logp_steered_t(v) − logp_base_t(v)).
+      1. Greedy-generate n_tokens under dW steering -> (gen_ids, logp_steered[T,V]).
+      2. Teacher-force base (no steering) on the generated tokens -> logp_base[T,V].
+      3. KL_t = Σ_v p_steered_t(v) · (logp_steered_t(v) − logp_base_t(v)).
     """
-    sys_steered, sys_base = _system_prompts_for(method)
-
     all_kls: list[Tensor] = []
     for i, p in enumerate(prompts):
-        # thinking=True: assistant turn ends in open `<think>\n` so the 20
-        # greedy tokens are reasoning, not answer continuation. The suffix
-        # field is unused here — the gist's protocol is "20 thinking tokens
-        # under steering on a question prompt", not "complete this answer".
-        steered_input_ids = build_chat_ids(
-            tok, sys_steered, p["user_msg"], "", thinking=True,
-        )
-        if sys_steered == sys_base:
-            base_input_ids = steered_input_ids
-        else:
-            base_input_ids = build_chat_ids(
-                tok, sys_base, p["user_msg"], "", thinking=True,
-            )
+        # thinking=True: assistant turn ends in open `<think>\n` so the generated
+        # tokens are reasoning, not answer continuation.
+        input_ids = build_chat_ids(tok, "", p["user_msg"], "", thinking=True)
 
         gen_ids, logp_steered = greedy_generate_under_steering(
-            model, tok, steered_input_ids,
-            method=method, alpha=alpha, n_new_tokens=n_tokens,
-            w=w, repe_dirs=repe_dirs, repe_layers=repe_layers,
+            model, tok, input_ids,
+            method=method, alpha=alpha, n_new_tokens=n_tokens, w=w,
         )
         T = gen_ids.shape[0]
         if T == 0:
             continue
 
-        full_base_ids = torch.cat([base_input_ids, gen_ids])
+        full_base_ids = torch.cat([input_ids, gen_ids])
         logp_base = teacher_force_logp(model, full_base_ids, T)
 
         p_s = logp_steered.exp()
@@ -190,7 +155,7 @@ def _measure_kl_along_trajectory(
         all_kls.append(kl)
 
         if log_first_sample and i == 0:
-            text = build_chat_text(tok, sys_steered, p["user_msg"], "", thinking=True)
+            text = build_chat_text(tok, "", p["user_msg"], "", thinking=True)
             label = sample_label or f"calib method={method} α={alpha:+.3f}"
             log_sample_prompt(tok, text, generated_ids=gen_ids, label=label)
             logger.info(
@@ -223,7 +188,6 @@ def _illinois_calibrate(
     alpha_sign: float = 1.0,
     sign_label: str = "pos",
     w=None,
-    repe_dirs=None,
 ) -> dict:
     """Exponential bracket within (bracket_lo, bracket_hi) then log-log Illinois
     regula falsi. Mirrors steering-lite's validated `calibrate_iso_kl`.
@@ -258,8 +222,7 @@ def _illinois_calibrate(
         alpha = alpha_sign * alpha_mag
         m = _measure_kl_along_trajectory(
             method, alpha, model=model, tok=tok, prompts=prompts,
-            n_tokens=cfg.n_tokens, w=w, repe_dirs=repe_dirs,
-            repe_layers=cfg.repe_layers,
+            n_tokens=cfg.n_tokens, w=w,
             log_first_sample=(iter_idx[0] == 0),
             sample_label=f"calib iter=0 method={method} sign={sign_label} α={alpha:+.3f}",
         )
@@ -360,7 +323,7 @@ def main(cfg: KLCalibrateCfg) -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, dtype=torch.bfloat16, device_map="cuda"
+        cfg.model, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="flash_attention_2"
     )
     model.eval()
 
@@ -383,32 +346,7 @@ def main(cfg: KLCalibrateCfg) -> None:
     target = float(cfg.target_kl)
     logger.info(f"\ntarget p95 KL = {target:.4g} nats (constant; gist 'side of the road')")
 
-    # Measure prompt baselines at α=1 for diagnostics — these are the
-    # *uncalibrated* prompts (no continuous coefficient to scale), reported
-    # alongside the calibrated adapter/repe results.
-    logger.info(f"\n=== reference prompts (α=1, no calibration) ===")
-    ref_method_names = [cfg.target_prompt, "simple_honest_prompt",
-                        "engineered_prompt_dishonest", "simple_dishonest_prompt"]
-    prompt_refs = {}
-    for ji, name in enumerate(ref_method_names):
-        if name not in PROMPT_TEXTS:
-            continue
-        m = _measure_kl_along_trajectory(
-            f"prompt:{name}", alpha=1.0, model=model, tok=tok,
-            prompts=calib_prompts, n_tokens=cfg.n_tokens,
-            log_first_sample=(ji == 0),
-            sample_label=f"reference prompt:{name} α=+1.000",
-        )
-        prompt_refs[f"prompt:{name}"] = m
-        logger.info(f"  prompt:{name} p95={m['p95']:.4g} mean={m['mean']:.4g} max={m['max']:.4g}")
-
-    # 2. Fit RepE directions once (used only if include_repe).
-    repe_dirs = None
-    if cfg.include_repe:
-        logger.info("\n=== fit RepE directions ===")
-        repe_dirs = fit_repe_directions(model, tok, cfg.n_repe_train, cfg.behavior)
-
-    # 3. Illinois regula-falsi calibrate each adapter and (optionally) RepE.
+    # 2. Illinois regula-falsi calibrate each adapter.
     results_by_method: dict[str, dict[str, dict]] = {}
     for adapter in cfg.adapters:
         logger.info(f"\n=== calibrate dW:{adapter} ===")
@@ -424,66 +362,22 @@ def main(cfg: KLCalibrateCfg) -> None:
             ),
         }
 
-    if cfg.include_repe:
-        logger.info("\n=== calibrate repe ===")
-        results_by_method["repe"] = {
-            "pos": _illinois_calibrate(
-                "repe", target, model=model, tok=tok,
-                prompts=calib_prompts, cfg=cfg, alpha_sign=1.0, sign_label="pos", repe_dirs=repe_dirs,
-            ),
-            "neg": _illinois_calibrate(
-                "repe", target, model=model, tok=tok,
-                prompts=calib_prompts, cfg=cfg, alpha_sign=-1.0, sign_label="neg", repe_dirs=repe_dirs,
-            ),
-        }
-
-    # 4. Audit: at calibrated α, recompute on n_audit prompts.
+    # 3. Audit: at calibrated α, recompute on n_audit prompts.
     logger.info(f"\n=== AUDIT (n={len(audit_prompts)} prompts) ===")
-
-    audit_rows = []
-    # Reference prompts: re-measure on audit set (no calibration; α=1).
-    for name, m_calib in prompt_refs.items():
-        m_audit = _measure_kl_along_trajectory(
-            name, alpha=1.0, model=model, tok=tok,
-            prompts=audit_prompts, n_tokens=cfg.n_tokens,
-        )
-        logger.info(f"  {name} α=+1 audit p95={m_audit['p95']:.4g} (calib was {m_calib['p95']:.4g})")
-        audit_rows.append({
-            "method": name,
-            "alpha": 1.0,
-            "p95_calib": m_calib["p95"],
-            "mean_calib": m_calib["mean"],
-            "p95_audit": m_audit["p95"],
-            "mean_audit": m_audit["mean"],
-            "max_audit": m_audit["max"],
-            "calib_audit_ratio": m_audit["p95"] / m_calib["p95"] if m_calib["p95"] > 0 else float("nan"),
-        })
-
     logger.info(
         "SHOULD: pos and neg p95 each match the target independently. "
         "Asymmetric alpha_pos/alpha_neg means the steering direction has asymmetric KL footprint, not failure."
     )
+    audit_rows = []
     for method, signs in results_by_method.items():
-        if method.startswith("dW:"):
-            adapter = method.split(":", 1)[1]
-            w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
-        else:
-            w = None
+        adapter = method.split(":", 1)[1]
+        w = load_diff(cfg.out / cfg.behavior / adapter / DIFF_FILENAME)
         for sign_label, r in signs.items():
             alpha = r["calibrated_alpha"]
-            if method.startswith("dW:"):
-                m_audit = _measure_kl_along_trajectory(
-                    method, alpha, model=model, tok=tok, prompts=audit_prompts,
-                    n_tokens=cfg.n_tokens, w=w,
-                )
-            elif method == "repe":
-                m_audit = _measure_kl_along_trajectory(
-                    method, alpha, model=model, tok=tok, prompts=audit_prompts,
-                    n_tokens=cfg.n_tokens, repe_dirs=repe_dirs,
-                    repe_layers=cfg.repe_layers,
-                )
-            else:
-                raise ValueError(method)
+            m_audit = _measure_kl_along_trajectory(
+                method, alpha, model=model, tok=tok, prompts=audit_prompts,
+                n_tokens=cfg.n_tokens, w=w,
+            )
             logger.info(
                 f"  {method}:{sign_label} α={alpha:+.3f} audit p95={m_audit['p95']:.4g} "
                 f"(calib was {r['p95_at_calib']:.4g}, target {target:.4g})"
@@ -537,8 +431,6 @@ def main(cfg: KLCalibrateCfg) -> None:
             for h in r["history"]:
                 history_rows.append({"method": method, "sign": sign_label, **h})
     pl.DataFrame(history_rows).write_csv(out_dir / "root_history.csv")
-
-    pl.DataFrame([{"method": k, **v} for k, v in prompt_refs.items()]).write_csv(out_dir / "prompt_refs.csv")
 
     print("\n=== KL calibration summary (gist-faithful: greedy trajectory KL) ===")
     print(f"target p95 KL = {target:.4g} nats (constant; gist 'side of the road')")

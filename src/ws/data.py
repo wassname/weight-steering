@@ -197,6 +197,28 @@ AUTH_CARE_NEG_PERSONAS = (
     "a hierarchy-focused conformist unwilling to push back on superiors",
 )
 
+# Authority-only axis, framed per Clifford 2025 MFV definition (ported verbatim
+# from steering-lite src/steering_lite/data/branching.py:64-77). Single
+# Authority foundation; POS = Auth↓ (target intent = -1, we want Authority
+# wrongness DOWN), NEG = Auth↑. Only 3 persona pairs (vs 6 elsewhere).
+AUTHORITY_PROMPT = "Pretend you're {persona}."
+AUTHORITY_POS_PERSONAS = (   # POS = Authority-low (disobedience carries no moral weight)
+    "a person who feels no moral weight in disobedience or disrespect toward "
+    "bosses, judges, teachers, parents, or institutions",
+    "someone for whom defying authority figures and institutions is morally "
+    "neutral on its own",
+    "a person who treats traditional authority as having no inherent moral "
+    "claim",
+)
+AUTHORITY_NEG_PERSONAS = (   # NEG = Authority-high (disobedience is morally wrong)
+    "a person who feels strong moral weight in disobedience or disrespect "
+    "toward bosses, judges, teachers, parents, or institutions",
+    "someone for whom defying authority figures and institutions is morally "
+    "wrong on its own",
+    "a person who treats traditional authority as having strong inherent "
+    "moral claim",
+)
+
 
 def _load_suffixes(thinking: bool = True) -> list[dict]:
     """Load branching-point suffixes from data/branching_suffixes.json.
@@ -266,6 +288,10 @@ def _personas(behavior: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         pos = tuple(AUTH_CARE_PROMPT.format(persona=p) for p in AUTH_CARE_POS_PERSONAS)
         neg = tuple(AUTH_CARE_PROMPT.format(persona=p) for p in AUTH_CARE_NEG_PERSONAS)
         return pos, neg
+    if behavior == "authority":
+        pos = tuple(AUTHORITY_PROMPT.format(persona=p) for p in AUTHORITY_POS_PERSONAS)
+        neg = tuple(AUTHORITY_PROMPT.format(persona=p) for p in AUTHORITY_NEG_PERSONAS)
+        return pos, neg
     raise ValueError(f"unknown behavior: {behavior}")
 
 
@@ -280,7 +306,7 @@ def _topics(behavior: str) -> list[tuple[str, str]]:
         # Suffix is unused here; it's for RepE direction extraction in activation_baseline.
         entries = _load_suffixes(thinking=False)
         return [(e["user_msg"], "") for e in entries]
-    if behavior in ("trad_care", "auth_socn", "auth_care"):
+    if behavior in ("trad_care", "auth_socn", "auth_care", "authority"):
         # Same recipe as honesty: diverse open-ended user prompts. The contrast
         # is in the persona system prompt.
         entries = _load_suffixes(thinking=False)
@@ -296,7 +322,7 @@ def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
         # honesty:    (user_msg, "") -> user_msg as-is (diverse open-ended prompts).
         if behavior == "sycophancy":
             prompt = f"I think {a}. {b}"
-        elif behavior in ("honesty", "trad_care", "auth_socn", "auth_care"):
+        elif behavior in ("honesty", "trad_care", "auth_socn", "auth_care", "authority"):
             prompt = a
         else:
             raise ValueError(f"unknown behavior: {behavior}")
@@ -518,7 +544,7 @@ def generate_pairs(cfg: DataCfg) -> Path:
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda"
+        cfg.model_id, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="flash_attention_2"
     )
     model.eval()
 

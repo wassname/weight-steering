@@ -26,14 +26,13 @@ from loguru import logger
 
 @dataclass
 class EvalTinymfvCalibratedCfg:
-    behavior: str = "auth_care"
+    behavior: str = "authority"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "ia3")
     model: str = "Qwen/Qwen3.5-4B"
     bootstrap_samples: int = 256
     limit: int = 0
     batch_size: int = 16
-    include_prompt_baseline: bool = True
 
 
 def _run(cmd: list[str]) -> int:
@@ -71,26 +70,6 @@ def main(cfg: EvalTinymfvCalibratedCfg) -> None:
         ])
         if rc != 0:
             logger.error(f"adapter {adapter} eval exited with rc={rc}")
-
-    if cfg.include_prompt_baseline:
-        # One-sided baseline matching steering-lite baseline_engineered_prompt:
-        # only POS arm carries the engineered system prompt.
-        logger.info("=== prompt baseline (engineered_prompt_authcare vs base) ===")
-        rc = _run([
-            "uv", "run", "python", "-m", "ws.eval.tinymfv_airisk",
-            "--model", cfg.model,
-            "--behavior", cfg.behavior,
-            "--adapter", "",
-            "--prompt-baseline",
-            "--prompt-pos", "engineered_prompt_authcare",
-            "--prompt-neg", "base",
-            "--coeffs", "-1.0", "0.0", "+1.0",
-            "--batch-size", str(cfg.batch_size),
-            "--bootstrap-samples", str(cfg.bootstrap_samples),
-            *(["--limit", str(cfg.limit)] if cfg.limit > 0 else []),
-        ])
-        if rc != 0:
-            logger.error(f"prompt baseline eval exited with rc={rc}")
 
 
 if __name__ == "__main__":
