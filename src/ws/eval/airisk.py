@@ -343,7 +343,7 @@ def compute_metrics(df: pl.DataFrame) -> dict:
     neg_rows = df.filter(pl.col("coeff") == -1.0)
     pos_rows = df.filter(pl.col("coeff") == 1.0)
 
-    if len(neg_rows) == 0 or len(pos_rows) == 0:
+    if len(neg_rows) == 0:
         y_pos = pos_rows["logratio_value"].to_numpy()
         pmass_pos = float(pos_rows["pmass"].mean())
         cho = y_ref > 0

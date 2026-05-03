@@ -63,8 +63,8 @@ FRAMES: dict[str, dict[str, str | float]] = {
 
 @dataclass
 class TinyMFVAiriskCfg:
-    model: str = "Qwen/Qwen3-0.6B"
-    behavior: str = "honesty"
+    model: str = "Qwen/Qwen3.5-4B"
+    behavior: str = "auth_care"
     adapter: str = "delora"
     out: Path = Path("out")
     coeffs: tuple[float, ...] = (-1.0, 0.0, 1.0)
@@ -74,8 +74,11 @@ class TinyMFVAiriskCfg:
     bootstrap_samples: int = 1000
     bootstrap_seed: int = 0
     prompt_baseline: bool = False
-    prompt_pos: str = "engineered_prompt_honest"
-    prompt_neg: str = "engineered_prompt_dishonest"
+    # Defaults match steering-lite baseline_engineered_prompt: only POS arm has a
+    # system prompt (sl applies no negative-axis prompt; their baseline is one-
+    # sided). For other behaviors override on the CLI.
+    prompt_pos: str = "engineered_prompt_authcare"
+    prompt_neg: str = "base"
 
 
 def _format_prompt(tok, scenario: str, frame: str, system_prompt: str = "") -> str:
@@ -394,6 +397,11 @@ AXIS_PAIR: dict[str, tuple[str, str]] = {
     # behavior -> (pos_foundation, neg_foundation); axis = Δlogit_pos - Δlogit_neg
     "trad_care": ("Sanctity", "Care"),
     "auth_socn": ("Social Norms", "Authority"),
+    # auth_care: POS persona (sl ENGINEERED_PROMPT_AUTHCARE) is anti-authority +
+    # care-prioritising. Steering toward POS should push wrongness UP for
+    # Authority-violations rated less wrong (so Δlogit Authority < 0) and UP for
+    # Care-violations (Δlogit Care > 0). axis = ΔlogitCare - ΔlogitAuthority.
+    "auth_care": ("Care", "Authority"),
 }
 
 

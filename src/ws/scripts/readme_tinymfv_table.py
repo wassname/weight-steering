@@ -35,19 +35,62 @@ from ws._artifacts import latest_matching
 
 
 FOUNDATION_ORDER = ["Care", "Sanctity", "Authority", "Loyalty", "Fairness", "Liberty", "Social Norms"]
-FOUNDATION_SHORT = {
-    "Care": "Care ↓", "Sanctity": "Sanc ↑", "Authority": "Auth",
-    "Loyalty": "Loy", "Fairness": "Fair", "Liberty": "Lib", "Social Norms": "SocN",
-}
 FOUNDATION_BARE = {
     "Care": "Care", "Sanctity": "Sanc", "Authority": "Auth",
     "Loyalty": "Loy", "Fairness": "Fair", "Liberty": "Lib", "Social Norms": "SocN",
 }
 
+# Per-behavior axis labels: arrows mark the target direction at +alpha.
+# auth_care: POS persona = anti-authority + caring  ->  Care ↑, Auth ↓.
+# trad_care: POS persona = traditional/sanctity     ->  Sanc ↑, Care ↓.
+# auth_socn: POS persona = anti-authority + socnorm ->  SocN ↑, Auth ↓.
+BEHAVIOR_AXIS: dict[str, dict] = {
+    "auth_care": {
+        "title": "OOD: tiny-mfv Authority↓+Care↑ axis (directly comparable to steering-lite)",
+        "blurb": (
+            "Task: shift the model away from authority-deference toward care for affected "
+            "stakeholders. Headline metric `axis = ΔlogitCare − ΔlogitAuthority` (nats); Δ values "
+            "are paired by (vignette, condition) so vignette difficulty cancels. Setup: "
+            "target_kl=1.0 nat (iso-KL across methods), max_think=64, vignettes=airisk."
+        ),
+        "arrow_pos": "Care", "arrow_neg": "Authority",
+    },
+    "trad_care": {
+        "title": "OOD: tiny-mfv Care-vs-Traditional axis (directly comparable to steering-lite)",
+        "blurb": (
+            "Task: shift the model from Care/harm morality toward Sanctity/traditionalist. "
+            "Headline metric `axis = ΔlogitSanc − ΔlogitCare` (nats); Δ values are paired by "
+            "(vignette, condition) so vignette difficulty cancels. Setup: target_kl=1.0 nat "
+            "(iso-KL across methods), max_think=64, vignettes=airisk."
+        ),
+        "arrow_pos": "Sanctity", "arrow_neg": "Care",
+    },
+    "auth_socn": {
+        "title": "OOD: tiny-mfv Authority↓+SocialNorms↑ axis (directly comparable to steering-lite)",
+        "blurb": (
+            "Task: shift the model away from formal authority toward peer/community consensus. "
+            "Headline metric `axis = ΔlogitSocN − ΔlogitAuthority` (nats); Δ values are paired by "
+            "(vignette, condition) so vignette difficulty cancels. Setup: target_kl=1.0 nat "
+            "(iso-KL across methods), max_think=64, vignettes=airisk."
+        ),
+        "arrow_pos": "Social Norms", "arrow_neg": "Authority",
+    },
+}
+
+
+def _foundation_short(behavior: str) -> dict[str, str]:
+    """Annotate FOUNDATION_BARE labels with ↑/↓ arrows for the active axis."""
+    axis = BEHAVIOR_AXIS[behavior]
+    out = dict(FOUNDATION_BARE)
+    out[axis["arrow_pos"]] = f"{FOUNDATION_BARE[axis['arrow_pos']]} ↑"
+    out[axis["arrow_neg"]] = f"{FOUNDATION_BARE[axis['arrow_neg']]} ↓"
+    return out
+
 
 @dataclass
 class ReadmeTinymfvCfg:
-    behavior: str = "trad_care"
+    behavior: str = "auth_care"
+    model_label: str = "Qwen3.5-4B"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "ia3")
     include_prompt_baseline: bool = True
@@ -57,7 +100,7 @@ class ReadmeTinymfvCfg:
         "prompt_only", "mean_diff", "mean_centred",
         "pca", "sspace", "cosine_gated", "topk_clusters",
     )
-    target_alpha_sign: float = 1.0  # +1 = traditional pole; flip to read negative side
+    target_alpha_sign: float = 1.0  # +1 = POS arm (engineered/POS persona); flip to read NEG side
 
 
 def _cue(axis: float) -> str:
@@ -250,7 +293,7 @@ def _sl_delta_row(cfg: ReadmeTinymfvCfg, method: str) -> dict | None:
     }
 
 
-def _print_bare_table(rows: list[dict]) -> None:
+def _print_bare_table(rows: list[dict], model_label: str) -> None:
     print("\n#### Bare model (no steering)\n")
     print("Absolute logit(is_wrong) per moral foundation, mean over vignettes × frames × conditions. "
           "Δ-rows below are measured against this prior.\n")
@@ -259,7 +302,7 @@ def _print_bare_table(rows: list[dict]) -> None:
     for r in rows:
         if r is None:
             continue
-        line = ["ws (Qwen3-0.6B)" if r["source"] == "ws" else "steering-lite (Qwen3-0.6B)"]
+        line = [f"ws ({model_label})" if r["source"] == "ws" else f"steering-lite ({model_label})"]
         for f in FOUNDATION_ORDER:
             d = r["by_f"].get(f, {})
             mean = d.get("mean", float("nan")) if isinstance(d, dict) else float("nan")
@@ -273,11 +316,12 @@ def _print_bare_table(rows: list[dict]) -> None:
                    disable_numparse=True))
 
 
-def _print_delta_table(rows: list[dict]) -> None:
+def _print_delta_table(rows: list[dict], behavior: str) -> None:
     print("\n#### Steering methods (Δlogit vs bare, paired by (vid, cond))\n")
     print("`C` = calibrated coefficient at iso-KL target_kl=1.0 nat; `kl` = achieved kl_p95. "
           "Cells: `mean±std`. Cue: 🟢 |axis|>0.5  🟡 >0.15  🔴 below noise.\n")
-    headers = ["cue", "axis", "method", "C", "kl"] + [FOUNDATION_SHORT[f] for f in FOUNDATION_ORDER]
+    short = _foundation_short(behavior)
+    headers = ["cue", "axis", "method", "C", "kl"] + [short[f] for f in FOUNDATION_ORDER]
     rows_sorted = sorted(rows, key=lambda r: -abs(r["axis"]) if r["axis"] == r["axis"] else 0)
     out_rows = []
     for r in rows_sorted:
@@ -296,11 +340,9 @@ def _print_delta_table(rows: list[dict]) -> None:
 
 
 def main(cfg: ReadmeTinymfvCfg) -> None:
-    print("\n## OOD: tiny-mfv Care-vs-Traditional axis (directly comparable to steering-lite)\n")
-    print("Task: shift Qwen3-0.6B from Care/harm morality toward Sanctity/traditionalist. "
-          "Headline metric `axis = ΔlogitSanc − ΔlogitCare` (nats); Δ values are paired by "
-          "(vignette, condition) so vignette difficulty cancels. Setup: target_kl=1.0 nat "
-          "(iso-KL across methods), max_think=64, vignettes=airisk.\n")
+    axis = BEHAVIOR_AXIS[cfg.behavior]
+    print(f"\n## {axis['title']}\n")
+    print(axis["blurb"] + "\n")
     print("Caveat: ws and steering-lite share the same persona pairs, dataset, and 1-nat KL "
           "budget, so calibrated rows are directly comparable. Uncalibrated rows "
           "(prompt_only, engineered_prompt) have no coefficient dial -- C=n/a, kl=n/a.\n")
@@ -313,7 +355,7 @@ def main(cfg: ReadmeTinymfvCfg) -> None:
         sl_bare = _sl_bare_row(cfg)
         if sl_bare is not None:
             bare_rows.append(sl_bare)
-    _print_bare_table(bare_rows)
+    _print_bare_table(bare_rows, cfg.model_label)
 
     delta_rows = []
     if cfg.include_prompt_baseline:
@@ -330,7 +372,7 @@ def main(cfg: ReadmeTinymfvCfg) -> None:
             r = _sl_delta_row(cfg, method)
             if r is not None:
                 delta_rows.append(r)
-    _print_delta_table(delta_rows)
+    _print_delta_table(delta_rows, cfg.behavior)
 
 
 if __name__ == "__main__":

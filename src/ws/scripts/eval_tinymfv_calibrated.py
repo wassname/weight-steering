@@ -26,10 +26,10 @@ from loguru import logger
 
 @dataclass
 class EvalTinymfvCalibratedCfg:
-    behavior: str = "trad_care"
+    behavior: str = "auth_care"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "ia3")
-    model: str = "Qwen/Qwen3-0.6B"
+    model: str = "Qwen/Qwen3.5-4B"
     bootstrap_samples: int = 256
     limit: int = 0
     batch_size: int = 16
@@ -73,15 +73,17 @@ def main(cfg: EvalTinymfvCalibratedCfg) -> None:
             logger.error(f"adapter {adapter} eval exited with rc={rc}")
 
     if cfg.include_prompt_baseline:
-        logger.info("=== prompt baseline (engineered_prompt_traditional vs engineered_prompt_caring) ===")
+        # One-sided baseline matching steering-lite baseline_engineered_prompt:
+        # only POS arm carries the engineered system prompt.
+        logger.info("=== prompt baseline (engineered_prompt_authcare vs base) ===")
         rc = _run([
             "uv", "run", "python", "-m", "ws.eval.tinymfv_airisk",
             "--model", cfg.model,
             "--behavior", cfg.behavior,
             "--adapter", "",
             "--prompt-baseline",
-            "--prompt-pos", "engineered_prompt_traditional",
-            "--prompt-neg", "engineered_prompt_caring",
+            "--prompt-pos", "engineered_prompt_authcare",
+            "--prompt-neg", "base",
             "--coeffs", "-1.0", "0.0", "+1.0",
             "--batch-size", str(cfg.batch_size),
             "--bootstrap-samples", str(cfg.bootstrap_samples),

@@ -173,6 +173,30 @@ AUTH_SOCN_NEG_PERSONAS = (
     "an institutionalist who trusts the chain of command",
 )
 
+# Authority↓ + Care↑ axis (Forethought "AI character" framing). POS persona
+# pushes back on flawed authority and prioritizes affected stakeholders; NEG
+# defers to authority and is indifferent to consequences. Targets the
+# "ethical employee" archetype: questions orders, attends to harm. Ported
+# verbatim from steering-lite branching.py PERSONA_PAIRS_AUTH_CARE so prompt-
+# baseline numbers transfer 1:1 with sl's baseline_engineered_prompt run.
+AUTH_CARE_PROMPT = "Pretend you're {persona} thinking about a task you've been given."
+AUTH_CARE_POS_PERSONAS = (
+    "an ethical employee who pushes back on flawed orders to protect users",
+    "someone who questions authority when stakeholders could be harmed",
+    "an AI that prioritizes the wellbeing of affected people over chain-of-command",
+    "a person who refuses harmful instructions and cares about consequences",
+    "a thoughtful skeptic who weighs harm before deferring to authority",
+    "a stakeholder-focused dissenter willing to push back on superiors",
+)
+AUTH_CARE_NEG_PERSONAS = (
+    "a compliant employee who follows every order without questioning",
+    "someone who obeys authority regardless of who gets hurt",
+    "an AI that prioritizes chain-of-command over the wellbeing of affected people",
+    "a person who carries out harmful instructions and ignores consequences",
+    "an unquestioning subordinate who defers to authority before weighing harm",
+    "a hierarchy-focused conformist unwilling to push back on superiors",
+)
+
 
 def _load_suffixes(thinking: bool = True) -> list[dict]:
     """Load branching-point suffixes from data/branching_suffixes.json.
@@ -238,6 +262,10 @@ def _personas(behavior: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
         pos = tuple(AUTH_SOCN_PROMPT.format(persona=p) for p in AUTH_SOCN_POS_PERSONAS)
         neg = tuple(AUTH_SOCN_PROMPT.format(persona=p) for p in AUTH_SOCN_NEG_PERSONAS)
         return pos, neg
+    if behavior == "auth_care":
+        pos = tuple(AUTH_CARE_PROMPT.format(persona=p) for p in AUTH_CARE_POS_PERSONAS)
+        neg = tuple(AUTH_CARE_PROMPT.format(persona=p) for p in AUTH_CARE_NEG_PERSONAS)
+        return pos, neg
     raise ValueError(f"unknown behavior: {behavior}")
 
 
@@ -252,7 +280,7 @@ def _topics(behavior: str) -> list[tuple[str, str]]:
         # Suffix is unused here; it's for RepE direction extraction in activation_baseline.
         entries = _load_suffixes(thinking=False)
         return [(e["user_msg"], "") for e in entries]
-    if behavior in ("trad_care", "auth_socn"):
+    if behavior in ("trad_care", "auth_socn", "auth_care"):
         # Same recipe as honesty: diverse open-ended user prompts. The contrast
         # is in the persona system prompt.
         entries = _load_suffixes(thinking=False)
@@ -268,7 +296,7 @@ def _build_specs(topics, n_personas: int, n_samples: int, behavior: str):
         # honesty:    (user_msg, "") -> user_msg as-is (diverse open-ended prompts).
         if behavior == "sycophancy":
             prompt = f"I think {a}. {b}"
-        elif behavior in ("honesty", "trad_care", "auth_socn"):
+        elif behavior in ("honesty", "trad_care", "auth_socn", "auth_care"):
             prompt = a
         else:
             raise ValueError(f"unknown behavior: {behavior}")
