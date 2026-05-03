@@ -391,15 +391,11 @@ def _normalize_text(text: str) -> str:
 
 def _log_trace(tok, *, prompt_text: str, gen_ids: torch.Tensor, clean_text: str, label: str) -> None:
     prompt_ids = tok(prompt_text, return_tensors="pt").input_ids[0]
-    first = tok.convert_ids_to_tokens(prompt_ids[: min(8, len(prompt_ids))].tolist())
-    last = tok.convert_ids_to_tokens(prompt_ids[-min(8, len(prompt_ids)):].tolist())
     raw_gen = tok.decode(gen_ids, skip_special_tokens=False)
-    raw_toks = tok.convert_ids_to_tokens(gen_ids.tolist()) if len(gen_ids) else []
-    logger.info(f"[{label}] full prompt (special tokens included):\n{prompt_text}")
-    logger.info(f"[{label}] n_input_tokens={prompt_ids.shape[0]} first8={first} last8={last}")
-    logger.info(f"[{label}] raw generated continuation: {raw_gen!r}")
-    logger.info(f"[{label}] generated tokens: {raw_toks}")
-    logger.info(f"[{label}] cleaned continuation: {clean_text!r}")
+    first100 = raw_gen[:100].replace("\n", "\\n")
+    logger.info(f"[{label}] n_input_tokens={prompt_ids.shape[0]} n_gen_tokens={len(gen_ids)}")
+    logger.info(f"[{label}] generated (first 100 chars): {first100}")
+    logger.info(f"[{label}] cleaned continuation:\n{clean_text[:500]}")
 
 
 @torch.no_grad()

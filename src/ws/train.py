@@ -166,6 +166,7 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
     peft_cfg = make_peft_config(cfg.adapter, cfg.rank, cfg.alpha,
                                 layers_to_transform=layer_idxs)
     model = get_peft_model(model, peft_cfg)
+    model.enable_input_require_grads()  # required for gradient checkpointing + PEFT
     model.print_trainable_parameters()
 
     # 10% held-out split so eval_loss is logged alongside train_loss.
@@ -180,8 +181,9 @@ def train_adapter(cfg: TrainCfg, ds: Dataset) -> Path:
     args = TrainingArguments(
         output_dir=str(out_dir),
         per_device_train_batch_size=cfg.batch_size,
-        per_device_eval_batch_size=cfg.batch_size * 4,
+        per_device_eval_batch_size=cfg.batch_size,
         gradient_accumulation_steps=cfg.grad_accum,
+        gradient_checkpointing=True,
         learning_rate=cfg.lr,
         weight_decay=cfg.weight_decay,
         warmup_steps=cfg.warmup_steps,

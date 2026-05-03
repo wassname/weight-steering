@@ -85,6 +85,9 @@ BEHAVIOR_AXIS: dict[str, dict] = {
             "Persona prompts only (no engineered prompt)."
         ),
         "arrow_pos": None, "arrow_neg": "Authority",
+        # empirically the NEG arm (alpha<0) reduces authority-wrongness;
+        # pos arm increases it (inverted relative to persona labels).
+        "target_alpha_sign": -1.0,
     },
 }
 
@@ -368,6 +371,9 @@ def _print_delta_table(rows: list[dict], behavior: str) -> None:
 
 def main(cfg: ReadmeTinymfvCfg) -> None:
     axis = BEHAVIOR_AXIS[cfg.behavior]
+    # Allow per-behavior override of which alpha arm to show (e.g. authority uses neg arm).
+    if "target_alpha_sign" in axis:
+        cfg.target_alpha_sign = axis["target_alpha_sign"]
     print(f"\n## {axis['title']}\n")
     print(axis["blurb"] + "\n")
     print("Caveat: ws and steering-lite share the same persona pairs, dataset, and 1-nat KL "

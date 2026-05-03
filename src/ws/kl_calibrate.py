@@ -80,7 +80,7 @@ class KLCalibrateCfg:
     bracket_hi: float = 16.0
     n_root_iters: int = 12  # Illinois inner loop; usually converges in 3-5
     convergence_tol: float = 0.05  # |p95 - target| < tol (absolute, in nats)
-    use_4bit: bool = True
+    use_4bit: bool = False  # weight_steer adds float diffs to params; 4-bit packs weights as uint8, breaking add_
     seed: int = 0
 
 

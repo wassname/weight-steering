@@ -83,6 +83,20 @@ def _maybe_data(cfg: Cfg) -> Dataset:
 
 def main(cfg: Cfg) -> None:
     setup_logging("replicate")
+
+    out_dir = cfg.out / cfg.behavior / cfg.adapter
+    w_path = out_dir / "w.pt"
+    if w_path.exists():
+        logger.info(f"w.pt exists at {w_path}, skipping training")
+        final_summary(
+            out=w_path, argv=get_argv(),
+            main_metric=f"diff saved behavior={cfg.behavior} adapter={cfg.adapter}",
+            cue="🟢",
+            table_rows=[[cfg.behavior, cfg.adapter, cfg.model, str(w_path)]],
+            headers=["behavior", "adapter", "model", "out"],
+        )
+        return
+
     ds = _maybe_data(cfg)
 
     # Train pos and neg.

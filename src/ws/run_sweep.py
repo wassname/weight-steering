@@ -57,7 +57,7 @@ def main(cfg: SweepCfg) -> None:
         logger.info(f"=== adapter={adapter} ===")
         row = _run_one(cfg, adapter)
         rows.append(row)
-        logger.info(f"adapter={adapter} spread={row['logratio_spread']:+.3f} wall={row['wall_s']:.0f}s")
+        logger.info(f"adapter={adapter} wall={row['wall_s']:.0f}s")
 
     df = pl.DataFrame(rows)
     out_path = cfg.out / cfg.behavior / "sweep_summary.csv"

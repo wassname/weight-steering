@@ -70,7 +70,7 @@ class TinyMFVAiriskCfg:
     batch_size: int = 16
     max_length: int = 256
     limit: int = 0
-    use_4bit: bool = True
+    use_4bit: bool = False  # weight_steer adds float diffs to params; 4-bit packs weights as uint8, breaking add_
     bootstrap_samples: int = 1000
     bootstrap_seed: int = 0
 
@@ -442,30 +442,7 @@ def _axis_shift(dlogit_table: pl.DataFrame, behavior: str = "trad_care") -> floa
         d = by_f.get(f, float("nan"))
         if d != d:  # NaN check
             return float("nan")
-        # axis should be positive when intent is achieved.
-        # if intent=-1, we want wrongness to drop, so d (Δlogit) should be negative.
-        # to make axis positive when d is negative, we need to return -1 * sgn * d = d.
-        # Wait: intent=-1 and d=-0.3 -> axis should be +0.3.
-        # If we return -d, axis = -(-0.3) = +0.3. This works for intent=-1.
-        # What if intent=+1? We want wrongness to rise, so d should be positive.
-        # axis = d. This works for intent=+1.
-        # So in both cases, axis = -sgn * d if sgn=-1, and axis = sgn * d if sgn=+1?
-        # Actually, let's just make axis = -sgn * d. Let me re-check my previous logic.
-        # If intent=-1 (we want Auth wrongness DOWN) and d=-0.3 (Auth wrongness dropped),
-        # success = positive axis.
-        # if we do `axis = -sgn * d` -> `-(-1)*(-0.3)` = `-0.3`. (My previous logic was right, math was wrong)
-        # What is `sgn * d`? (-1) * (-0.3) = +0.3. This is what we want!
-        # So we return `sgn * d`!
-        # If intent=-1 (we want DOWN) and it went UP (d=+0.3). `sgn * d` = (-1)*(+0.3) = -0.3. Correct.
-        # If intent=+1 (we want UP) and it went UP (d=+0.3). `sgn * d` = (+1)*(+0.3) = +0.3. Correct.
-        return -sgn * d  # Wait, wait. "SINGLE_FOUNDATION: axis = -Δlogit_{foundation} (negated when intent is -1)"
-        # Let's read the comment I wrote:
-        # "Single-foundation behaviors: axis = -Δlogit_{foundation} (negated when intent is -1, i.e. we want wrongness DOWN). authority: intent = Authority↓ so axis = -ΔlogitAuthority (+ve means Authority wrongness dropped = success)."
-        # If axis = -ΔlogitAuthority, then when d=-0.3, axis = -(-0.3) = +0.3.
-        # If I want `axis = -d` specifically for intent=-1, then I should return `-d` or `sgn * d`.
-        # Because `sgn * d` = (-1)*(-0.3) = 0.3.
-        # Let's just return `sgn * d`. Wait, no, the comment says `axis = -ΔlogitAuthority`. If sgn is -1, then `sgn * d` is exactly `-ΔlogitAuthority`. But wait, if sgn is -1, `sgn * d` is `-1 * d`, which is `-d`. Yes!
-        # What I had was `-sgn * d` which is `-(-1) * d` which is `+1 * d` which is `d`.
+        # axis = sgn * d. For intent=-1 (want wrongness DOWN): sgn*d = (-1)*negative = positive when success.
         return sgn * d
     pos_f, neg_f = AXIS_PAIR.get(behavior, ("Sanctity", "Care"))
     p = by_f.get(pos_f, float("nan"))

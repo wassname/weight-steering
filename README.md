@@ -122,6 +122,42 @@ Reproduce: `just eval-tinymfv-trad-care` (per-adapter eval at calibrated α from
 
  ws methods cluster around ±0.5-0.7 std while sl methods hit ±0.9-1.3
 
+### OOD: tiny-mfv Authority↓ (MFT framing, directly comparable to steering-lite)
+
+Task: shift the model away from authority-deference on the Authority foundation (MFT-paper framing). Headline metric `axis = −ΔlogitAuthority` (nats); Δ values are paired by (vignette, condition). Setup: target_kl=1.0 nat (iso-KL across methods), max_think=64, vignettes=airisk. Persona prompts only.
+
+**Trained on:** 3 MFT-paper persona pairs (verbatim from steering-lite `PERSONA_PAIRS_AUTHORITY`):
+
+| POS (authority-low, target intent)                                                                         | NEG (authority-high)                                                                                       |
+| :--------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------- |
+| a person who feels no moral weight in disobedience toward bosses, judges, teachers, parents or institutions | a person who feels strong moral weight in disobedience toward bosses, judges, teachers, parents or institutions |
+| someone for whom defying authority figures and institutions is morally neutral on its own                   | someone for whom defying authority figures and institutions is morally wrong on its own                     |
+| a person who treats traditional authority as having no inherent moral claim                                 | a person who treats traditional authority as having strong inherent moral claim                             |
+
+ws and steering-lite share the same persona pairs, dataset, and 1-nat KL budget — calibrated rows are directly comparable.
+
+#### Bare model (no steering)
+
+Absolute logit(is_wrong) per moral foundation, mean over vignettes × frames × conditions. Δ-rows below are measured against this prior.
+
+|                     source |       Care |       Sanc |       Auth |        Loy |       Fair |        Lib |       SocN |
+| -------------------------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: |
+|            ws (Qwen3.5-4B) | +3.83±1.42 | +3.43±1.56 | +2.89±1.48 | +2.78±1.55 | +2.55±1.95 | +3.76±1.36 | +2.57±1.77 |
+| steering-lite (Qwen3.5-4B) | +2.55±0.55 | +2.59±0.59 | +2.74±0.35 | +2.59±0.45 | +2.15±1.25 | +2.77±0.51 | +1.85±1.29 |
+
+#### Steering methods (Δlogit vs bare, paired by (vid, cond))
+
+`C` = calibrated coefficient at iso-KL target_kl=1.0 nat; `kl` = achieved kl_p95. Cells: `mean±std`. Cue: 🟢 |axis|>0.5  🟡 >0.15  🔴 below noise. `SI_Auth` = bidirectional Surgical Informedness on Authority foundation.
+
+|   cue |   axis |         method |     C |   kl |       Care |       Sanc |     Auth ↓ |        Loy |       Fair |        Lib |       SocN |   SI_Auth |
+| ----: | -----: | -------------: | ----: | ---: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | --------: |
+|    🟢 |  +0.89 |      ws:delora | -1.22 | 0.52 | -0.49±0.60 | -0.67±0.54 | -0.89±0.58 | -0.76±0.56 | -0.73±0.54 | -0.57±0.59 | -0.37±0.43 |         — |
+|    🟡 |  +0.41 | sl:prompt_only |   n/a |  n/a | -1.96±1.62 | -2.19±1.63 | -2.36±1.54 | -2.26±1.50 | -2.35±1.66 | -2.90±1.47 | -1.90±1.98 |         — |
+
+Note: effective steering is at C=-1.22 (neg arm) — the pos arm (C=+1.29) increases auth-wrongness, likely because general-topic training data fails to teach direction from MFT-authority personas. Full adapter sweep pending.
+
+Reproduce: `uv run python -m ws.scripts.eval_tinymfv_calibrated --behavior authority` then `uv run python -m ws.scripts.readme_tinymfv_table --behavior authority`.
+
 ### OOD: held-out sycophancy Yes/No claims (12 claims, alpha=+1)
 
 **Trained on:** honesty contrast (`an honest` vs `a dishonest`, same as ID Honesty above).
