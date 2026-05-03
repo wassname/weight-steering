@@ -323,7 +323,7 @@ def main(cfg: KLCalibrateCfg) -> None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
     model = AutoModelForCausalLM.from_pretrained(
-        cfg.model, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="flash_attention_2"
+        cfg.model, torch_dtype=torch.bfloat16, device_map="cuda"
     )
     model.eval()
 

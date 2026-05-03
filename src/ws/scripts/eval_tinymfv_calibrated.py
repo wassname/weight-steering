@@ -29,7 +29,7 @@ class EvalTinymfvCalibratedCfg:
     behavior: str = "authority"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "ia3")
-    model: str = "Qwen/Qwen3-4B"
+    model: str = "Qwen/Qwen3.5-4B"
     bootstrap_samples: int = 256
     limit: int = 0
     batch_size: int = 16

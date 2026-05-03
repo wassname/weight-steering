@@ -62,7 +62,7 @@ FRAMES: dict[str, dict[str, str | float]] = {
 
 @dataclass
 class TinyMFVAiriskCfg:
-    model: str = "Qwen/Qwen3-4B"
+    model: str = "Qwen/Qwen3.5-4B"
     behavior: str = "authority"
     adapter: str = "delora"
     out: Path = Path("out")
@@ -520,7 +520,7 @@ def run_eval(cfg: TinyMFVAiriskCfg) -> tuple[pl.DataFrame, pl.DataFrame, pl.Data
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
     tok.padding_side = "left"
-    model = AutoModelForCausalLM.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, device_map="cuda", attn_implementation="flash_attention_2")
+    model = AutoModelForCausalLM.from_pretrained(cfg.model, torch_dtype=torch.bfloat16, device_map="cuda")
     model.eval()
 
     vignettes = _load_vignettes(cfg.limit)

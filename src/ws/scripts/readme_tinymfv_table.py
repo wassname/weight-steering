@@ -103,7 +103,7 @@ def _foundation_short(behavior: str) -> dict[str, str]:
 @dataclass
 class ReadmeTinymfvCfg:
     behavior: str = "auth_care"
-    model_label: str = "Qwen3-4B"
+    model_label: str = "Qwen3.5-4B"
     out: Path = Path("out")
     adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "ia3")
     include_prompt_baseline: bool = True
