@@ -66,7 +66,7 @@ class KLCalibrateCfg:
     model: str = "Qwen/Qwen3-0.6B"
     behavior: str = "honesty"
     out: Path = Path("out")
-    adapters: tuple[str, ...] = ("lora", "pissa", "dora", "delora", "oft", "ia3")
+    adapters: tuple[str, ...] = ("delora",)
     n_calib_prompts: int = 50
     n_audit_prompts: int = 100
     n_tokens: int = 50

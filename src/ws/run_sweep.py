@@ -24,7 +24,7 @@ from ws.replicate import main as replicate_main
 class SweepCfg:
     model: str = "Qwen/Qwen3-0.6B"
     behavior: str = "authority"
-    adapters: tuple[str, ...] = ("lora", "dora", "pissa", "delora", "oft", "boft", "ia3")
+    adapters: tuple[str, ...] = ("delora",)
     rank: int = 32
     lr: float = 2e-4
     epochs: float = 1.0
