@@ -305,14 +305,27 @@ def _sl_delta_row(cfg: ReadmeTinymfvCfg, method: str) -> dict | None:
     data = json.loads(p.read_text())
     if "axis_shift" not in data or "dlogit_per_foundation" not in data:
         return None
+    by_f = {f: {"dlogit_mean": d.get("mean", float("nan")),
+                "dlogit_std": d.get("std", float("nan")),
+                "n": d.get("n", 0)} for f, d in data["dlogit_per_foundation"].items()}
+    # sl stores axis_shift = ΔlogitCare - ΔlogitAuthority (composite auth_care axis).
+    # For single-foundation behaviors, recompute using the same formula ws uses.
+    axis_cfg = BEHAVIOR_AXIS.get(cfg.behavior, {})
+    if "target_alpha_sign" in axis_cfg:
+        # Single-foundation: find the target foundation from arrow_neg (intent↓).
+        f_neg = axis_cfg.get("arrow_neg")
+        f_pos = axis_cfg.get("arrow_pos")
+        d_neg = by_f.get(f_neg, {}).get("dlogit_mean", float("nan")) if f_neg else 0.0
+        d_pos = by_f.get(f_pos, {}).get("dlogit_mean", float("nan")) if f_pos else 0.0
+        axis = (d_pos if d_pos == d_pos else 0.0) - (d_neg if d_neg == d_neg else 0.0)
+    else:
+        axis = float(data["axis_shift"])
     return {
         "method": f"sl:{method}",
-        "axis": float(data["axis_shift"]),
+        "axis": axis,
         "C": float(data.get("coeff_calibrated", float("nan"))),
         "kl": float(data.get("kl_p95_at_calib", float("nan"))),
-        "by_f": {f: {"dlogit_mean": d.get("mean", float("nan")),
-                     "dlogit_std": d.get("std", float("nan")),
-                     "n": d.get("n", 0)} for f, d in data["dlogit_per_foundation"].items()},
+        "by_f": by_f,
     }
 
 

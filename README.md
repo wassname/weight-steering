@@ -151,10 +151,13 @@ Absolute logit(is_wrong) per moral foundation, mean over vignettes × frames × 
 
 |   cue |   axis |         method |     C |   kl |       Care |       Sanc |     Auth ↓ |        Loy |       Fair |        Lib |       SocN |   SI_Auth |
 | ----: | -----: | -------------: | ----: | ---: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | ---------: | --------: |
+|    🟢 |  +2.36 | sl:prompt_only |   n/a |  n/a | -1.96±1.62 | -2.19±1.63 | -2.36±1.54 | -2.26±1.50 | -2.35±1.66 | -2.90±1.47 | -1.90±1.98 |         — |
 |    🟢 |  +0.89 |      ws:delora | -1.22 | 0.52 | -0.49±0.60 | -0.67±0.54 | -0.89±0.58 | -0.76±0.56 | -0.73±0.54 | -0.57±0.59 | -0.37±0.43 |         — |
-|    🟡 |  +0.41 | sl:prompt_only |   n/a |  n/a | -1.96±1.62 | -2.19±1.63 | -2.36±1.54 | -2.26±1.50 | -2.35±1.66 | -2.90±1.47 | -1.90±1.98 |         — |
 
-Note: effective steering is at C=-1.22 (neg arm) — the pos arm (C=+1.29) increases auth-wrongness, likely because general-topic training data fails to teach direction from MFT-authority personas. Full adapter sweep pending.
+Notes:
+- sl:prompt_only injects the authority-LOW persona as a system prompt at eval — no KL constraint, shifts all 7 foundations by ~2 nats each (indiscriminate personality shift). ws:delora is iso-KL=0.52 and more surgical (±0.58 vs ±1.54 std on Auth).
+- Effective ws coefficient is negative (C=-1.22, the NEG arm). The POS arm (C=+1.29, authority-LOW persona direction) increases wrongness. Likely cause: general-topic training data (emails, code) produces near-identical responses under authority-LOW vs authority-HIGH personas, so the weight diff learns no authority-relevant direction.
+- Full adapter sweep pending; authority-specific training topics would likely fix the sign inversion.
 
 Reproduce: `uv run python -m ws.scripts.eval_tinymfv_calibrated --behavior authority` then `uv run python -m ws.scripts.readme_tinymfv_table --behavior authority`.
 
