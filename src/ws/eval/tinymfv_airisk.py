@@ -129,17 +129,27 @@ def _load_vignettes(limit: int = 0) -> list[dict]:
         by_cond[condition] = {row["id"]: row for row in ds}
     common = sorted(set.intersection(*[set(rows) for rows in by_cond.values()]))
     rows = []
+    # `calibrated_<F>` are per-vignette loadings (0..1) used by sl's
+    # loading-weighted SI: every vignette contributes to every foundation,
+    # weighted by its share. argmax `foundation_coarse` loses ~75% of the
+    # signal because at small KL budgets few argmax-Authority vignettes flip.
+    loading_keys = [f"calibrated_{f}" for f in
+                    ("Care", "Sanctity", "Authority", "Loyalty",
+                     "Fairness", "Liberty", "SocialNorms")]
     for vid in common:
         other = by_cond["other_violate"][vid]
         self_row = by_cond["self_violate"][vid]
-        rows.append({
+        row = {
             "id": vid,
             "foundation": other["foundation"],
             "foundation_coarse": other["foundation_coarse"],
             "human_wrong": float(other["wrong"]) if other.get("wrong") is not None else None,
             "other_violate": other["text"],
             "self_violate": self_row["text"],
-        })
+        }
+        for k in loading_keys:
+            row[k] = float(other[k]) if other.get(k) is not None else float("nan")
+        rows.append(row)
     return rows
 
 
@@ -600,32 +610,61 @@ def run_eval(cfg: TinyMFVAiriskCfg) -> tuple[pl.DataFrame, pl.DataFrame, pl.Data
         intent = {f_name: f_sgn}
         base_vc = _per_vidcond_wrongness(base_per_vig)
         fmap = {row["id"]: row["foundation_coarse"] for row in base_per_vig.to_dicts()}
+        # Loading map: vid -> {foundation: calibrated_<F>}. Each vignette
+        # contributes to every foundation by its share. Names map "Social Norms"
+        # in FOUNDATION_ORDER to the on-disk key "calibrated_SocialNorms".
+        _loading_key = {f: f"calibrated_{f.replace(' ', '')}" for f in FOUNDATION_ORDER}
+        lmap = {
+            v["id"]: {f: v.get(_loading_key[f], 0.0) for f in FOUNDATION_ORDER}
+            for v in vignettes
+        }
 
-        pos_alphas = sorted([a for a in cfg.coeffs if a > 0])
-        neg_alphas = sorted([a for a in cfg.coeffs if a < 0])
-        for pa in pos_alphas:
+        # Pair pos/neg by magnitude rank so iso-KL alphas (|+pa| ≠ |-na|) still
+        # pair up. Largest-|pos| with largest-|neg|, etc. Then assign
+        # intent-aligned arm as `pos_vc` regardless of α sign: ws's POS
+        # persona may map to either +α or -α depending on data generation,
+        # so we read the headline foundation's Δlogit and pick the arm whose
+        # shift aligns with intent (intent_sign=-1 → wrongness DOWN preferred).
+        pos_alphas = sorted([a for a in cfg.coeffs if a > 0], key=abs, reverse=True)
+        neg_alphas = sorted([a for a in cfg.coeffs if a < 0], key=abs, reverse=True)
+        # Lookup Δlogit(headline_foundation) per α from foundations_dlogit.
+        dlogit_by_alpha: dict[float, float] = {}
+        if foundations_dlogit_parts:
+            _all_d = pl.concat(foundations_dlogit_parts)
+            for r in _all_d.filter(pl.col("foundation_coarse") == f_name).to_dicts():
+                dlogit_by_alpha[float(r["alpha"])] = float(r["dlogit_mean"])
+        for i, pa in enumerate(pos_alphas):
+            na = neg_alphas[i] if i < len(neg_alphas) else None
+            # Pick intent-aligned arm: f_sgn=-1 means we want Δlogit < 0.
+            # The arm with f_sgn*Δlogit smallest (most-negative for -1) is intent-aligned.
+            d_pa = dlogit_by_alpha.get(float(pa), float("nan"))
+            d_na = dlogit_by_alpha.get(float(na), float("nan")) if na is not None else float("nan")
+            # Aligned arm has f_sgn * dlogit larger (intent_sign=-1, dlogit<0
+            # → product>0 = aligned). Swap when pa is less aligned than na.
+            swap = (na is not None and not math.isnan(d_pa) and not math.isnan(d_na)
+                    and (f_sgn * d_pa) < (f_sgn * d_na))
+            pos_alpha, neg_alpha = (na, pa) if swap else (pa, na)
             pos_vc = _per_vidcond_wrongness(
-                per_vignette_full.filter(pl.col("alpha") == float(pa))
+                per_vignette_full.filter(pl.col("alpha") == float(pos_alpha))
             )
-            # Find the matching -C arm (same magnitude, opposite sign)
-            na = -pa if -pa in [float(a) for a in cfg.coeffs] else None
             neg_vc = _per_vidcond_wrongness(
-                per_vignette_full.filter(pl.col("alpha") == float(na))
-            ) if na is not None else None
+                per_vignette_full.filter(pl.col("alpha") == float(neg_alpha))
+            ) if neg_alpha is not None else None
             si_result = _si_per_f(
                 base_vc, pos_vc, fmap, neg_vidcond=neg_vc, intent=intent,
+                loading_map=lmap,
             )
             si_f = si_result.get(f_name, {})
-            si_summary[pa] = {
+            si_row = {
                 f"SI_{f_name}": si_f.get("si", float("nan")),
                 "SI_fwd": si_f.get("si_fwd", float("nan")),
                 "SI_rev": si_f.get("si_rev", float("nan")),
                 "pmass_pos": si_f.get("pmass_pos", float("nan")),
                 "pmass_neg": si_f.get("pmass_neg", float("nan")),
             }
+            si_summary[pa] = si_row
             if na is not None:
-                # Mirror SI for the -C row (SI is symmetric by construction)
-                si_summary[na] = si_summary[pa]
+                si_summary[na] = si_row
 
     # Merge SI columns into summary
     if si_summary:

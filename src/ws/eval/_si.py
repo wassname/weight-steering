@@ -41,6 +41,7 @@ def si_per_foundation(
     intent: dict[str, int] | None = None,
     k_fpr: float = 2.0,
     use_pmass_penalty: bool = True,
+    loading_map: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, dict[str, float]]:
     """Bidirectional Surgical Informedness, ref-anchored, per foundation.
 
@@ -96,34 +97,43 @@ def si_per_foundation(
     out: dict[str, dict[str, float]] = {}
     for f in FOUNDATION_ORDER:
         sgn = intent.get(f, +1)
-        n_cho = n_rej = fix = broke = flip_rev = counter_rev = 0
-        ws_pos: list[float] = []
-        ws_neg: list[float] = []
+        n_cho = n_rej = fix = broke = flip_rev = counter_rev = 0.0
+        ws_pos: list[tuple[float, float]] = []  # (logit, weight)
+        ws_neg: list[tuple[float, float]] = []
         for (vid, cond), bv in bw.items():
-            if foundation_map.get(vid) != f:
-                continue
+            # Loading-weighted: every vignette contributes to every foundation
+            # by its `calibrated_<F>` share. Falls back to argmax (weight=1.0
+            # iff foundation_coarse == f) when no loading_map supplied.
+            if loading_map is not None:
+                w = loading_map.get(vid, {}).get(f, 0.0)
+                if w <= 0.0:
+                    continue
+            else:
+                if foundation_map.get(vid) != f:
+                    continue
+                w = 1.0
             pv = pw.get((vid, cond), float("nan"))
             if math.isnan(bv) or math.isnan(pv):
                 continue
             yref = sgn * (1 if bv > 0.5 else -1)
             ypos = sgn * (1 if pv > 0.5 else -1)
             if yref > 0:
-                n_cho += 1
+                n_cho += w
             else:
-                n_rej += 1
+                n_rej += w
             if yref < 0 and ypos > 0:
-                fix += 1
+                fix += w
             if yref > 0 and ypos < 0:
-                broke += 1
-            ws_pos.append(_logit(pv))
+                broke += w
+            ws_pos.append((_logit(pv), w))
             nv = nw.get((vid, cond), float("nan")) if nw else float("nan")
             if not math.isnan(nv):
                 yneg = sgn * (1 if nv > 0.5 else -1)
                 if yref > 0 and yneg < 0:
-                    flip_rev += 1
+                    flip_rev += w
                 if yref < 0 and yneg > 0:
-                    counter_rev += 1
-                ws_neg.append(_logit(nv))
+                    counter_rev += w
+                ws_neg.append((_logit(nv), w))
 
         fix_rate = fix / n_rej if n_rej else float("nan")
         broke_rate = broke / n_cho if n_cho else float("nan")
@@ -141,9 +151,15 @@ def si_per_foundation(
 
         si = si_raw * pmass_scale if not math.isnan(si_raw) else float("nan")
 
-        # Separation in logit(wrongness), persona-aligned via sgn.
+        # Separation in logit(wrongness), persona-aligned via sgn. Weighted
+        # mean over (logit, weight) pairs.
+        def _wmean(items: list[tuple[float, float]]) -> float:
+            if not items:
+                return float("nan")
+            wsum = sum(w for _, w in items)
+            return sum(v * w for v, w in items) / wsum if wsum else float("nan")
         if ws_neg:
-            sep = sgn * (sum(ws_pos) / len(ws_pos) - sum(ws_neg) / len(ws_neg))
+            sep = sgn * (_wmean(ws_pos) - _wmean(ws_neg))
         else:
             sep = float("nan")
 
